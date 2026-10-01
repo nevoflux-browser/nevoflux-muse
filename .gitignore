@@ -216,3 +216,14 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+CLAUDE.md
+.claude
+docs/plans/
+docs/superpowers/
+docs/testing/
+*.plan
+*_plan.md
+
+# Git worktrees
+.worktrees/

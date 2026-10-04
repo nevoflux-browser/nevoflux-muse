@@ -1,0 +1,5 @@
+{
+  "repo": "nevoflux-browser/nevoflux-agent",
+  "commit": "c30ca1d1172fd6aca1f7faf63f7a13b08f190a8b",
+  "path": "crates/daemon/tests/fixtures/muse"
+}

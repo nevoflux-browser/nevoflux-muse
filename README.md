@@ -6,8 +6,27 @@ The client an AI agent runs (in its own VM) to drive a NevoFlux browser it has
 been paired with. The protocol is documented in the head's repository:
 [`docs/muse-client-protocol.md`](https://github.com/nevoflux-browser/nevoflux-agent/blob/main/docs/muse-client-protocol.md).
 
-Status: skeleton. `nf version` works; pairing, the relay bridge and the rest
-of `nf` arrive with the reference implementation.
+Status: skeleton. `nf version`, `nf unpair` and `nf reset` work; pairing, the
+relay bridge and the rest of `nf` arrive with the reference implementation.
+
+## State and uninstalling
+
+The client keeps its pairing (the channel key) and account tokens in one
+directory: `$NF_HOME` if set, else `%LOCALAPPDATA%\nevoflux-muse` on Windows,
+`~/Library/Application Support/nevoflux-muse` on macOS, and
+`$XDG_STATE_HOME/nevoflux-muse` (default `~/.local/state/nevoflux-muse`)
+elsewhere.
+
+- `nf unpair` forgets the paired browser and keeps the account login, ready to
+  pair with another one. The browser still lists the agent until you remove it
+  in NevoFlux, but without the key the agent can no longer connect.
+- `nf reset` forgets everything. `pip uninstall` does not touch this directory,
+  so uninstall with:
+
+```sh
+nf reset
+pip uninstall nevoflux-muse
+```
 
 ## Development
 

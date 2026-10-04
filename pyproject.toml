@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nevoflux-muse"
+version = "0.1.0"
+description = "Connect a Muse agent to your NevoFlux browser — MCP over an E2E-encrypted relay."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=2.2,<2.3",
+    "websockets>=15,<16",
+    "cryptography>=44,<47",
+    "argon2-cffi>=23,<26",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.24", "ruff>=0.6"]
+
+[project.scripts]
+nf = "nevoflux_muse.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["nevoflux_muse*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

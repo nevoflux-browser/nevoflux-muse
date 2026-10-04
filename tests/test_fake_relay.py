@@ -75,8 +75,45 @@ async def test_channels_are_isolated(relay):
     await b.close()
 
 
-async def test_a_wrong_token_is_refused(relay):
-    ws = await join(relay, token="wrong")
-    with pytest.raises(websockets.ConnectionClosed) as exc:
-        await asyncio.wait_for(ws.recv(), 2)
-    assert exc.value.rcvd.code == 4403
+async def refused(relay, query: str) -> int:
+    with pytest.raises(websockets.InvalidStatus) as exc:
+        await websockets.connect(f"{relay.url}/?{query}")
+    return exc.value.response.status_code
+
+
+async def test_a_wrong_token_is_refused_with_401(relay):
+    assert await refused(relay, "c=c1&t=wrong") == 401
+
+
+async def test_a_missing_or_empty_token_is_refused_with_401(relay):
+    assert await refused(relay, "c=c1") == 401
+    assert await refused(relay, "c=c1&t=") == 401
+
+
+async def test_empty_token_is_refused_even_when_any_token_is_accepted():
+    r = await FakeRelay().start()
+    try:
+        assert await refused(r, "c=c1&t=") == 401
+        ws = await websockets.connect(f"{r.url}/?c=c1&t=anything")
+        assert await next_peers(ws) == 0
+        await ws.close()
+    finally:
+        await r.stop()
+
+
+async def test_a_missing_channel_is_refused_with_400(relay):
+    assert await refused(relay, f"t={TOKEN}") == 400
+
+
+async def test_another_account_on_an_owned_channel_gets_403():
+    r = await FakeRelay().start()
+    try:
+        a = await websockets.connect(f"{r.url}/?c=c1&t=alice")
+        assert await next_peers(a) == 0
+        assert await refused(r, "c=c1&t=bob") == 403
+        b = await websockets.connect(f"{r.url}/?c=c1&t=alice")
+        assert await next_peers(b) == 1
+        await a.close()
+        await b.close()
+    finally:
+        await r.stop()

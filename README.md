@@ -19,6 +19,10 @@ python -m venv .venv
 python scripts/check_fixtures.py          # fixtures match the pinned head commit
 ```
 
+Tests use `nevoflux_muse.testing.FakeRelay` as the relay test double. It differs from the
+production relay in a few documented ways (no per-channel capacity, no `ping`/`pong`, no
+`/presence` probe, no JWT verification); see its module docstring.
+
 `fixtures/muse/` is a byte-exact copy of the head's
 `crates/daemon/tests/fixtures/muse/` at the commit in `fixtures/SOURCE.json`.
 Never edit it by hand: change the head, then re-copy and re-pin.

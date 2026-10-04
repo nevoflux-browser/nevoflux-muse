@@ -1,0 +1,17 @@
+title = "nevoflux-muse"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "email-address"
+description = "Email address — account details must never land in this public repo"
+regex = '''[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'''
+keywords = ["@"]
+
+[[rules.allowlists]]
+regexes = [
+  '''noreply@anthropic\.com''',
+  '''[A-Za-z0-9._%+-]+@example\.(com|org|net)''',
+  '''[A-Za-z0-9._%+-]+@users\.noreply\.github\.com''',
+]

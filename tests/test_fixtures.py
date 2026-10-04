@@ -8,7 +8,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 FIX = ROOT / "fixtures" / "muse"
 sys.path.insert(0, str(ROOT / "scripts"))
 
-import check_fixtures  # noqa: E402
+import check_fixtures
 
 NAMES = ["PROTOCOL_VERSION", "kdf.json", "pairing_code.json", "seal.json",
          "envelope.json", "mcp_messages.json"]

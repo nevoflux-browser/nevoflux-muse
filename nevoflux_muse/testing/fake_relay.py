@@ -72,7 +72,7 @@ class FakeRelay:
                 for peer in list(members):
                     await self._tell(peer, len(members) - 1)
 
-    async def start(self) -> "FakeRelay":
+    async def start(self) -> FakeRelay:
         self._server = await websockets.serve(self._handler, self.host, self.port)
         self.port = self._server.sockets[0].getsockname()[1]
         return self

@@ -62,10 +62,12 @@ def fetch_local(agent: pathlib.Path, commit: str, path: str, names: list[str]) -
 def compare(local: dict[str, bytes], upstream: dict[str, bytes]) -> list[str]:
     if local.get("PROTOCOL_VERSION") != upstream.get("PROTOCOL_VERSION"):
         return [
-            "protocol upgraded upstream "
-            f"({local.get('PROTOCOL_VERSION', b'?').strip().decode()} -> "
-            f"{upstream.get('PROTOCOL_VERSION', b'?').strip().decode()}): "
-            "sync fixtures/muse and the client before anything else"
+            (
+                "protocol upgraded upstream "
+                f"({local.get('PROTOCOL_VERSION', b'?').strip().decode()} -> "
+                f"{upstream.get('PROTOCOL_VERSION', b'?').strip().decode()}): "
+                "sync fixtures/muse and the client before anything else"
+            )
         ]
     problems = []
     for name in sorted(set(local) | set(upstream)):

@@ -3,6 +3,11 @@ title = "nevoflux-muse"
 [extend]
 useDefault = true
 
+# Public, committed test vectors (key_hex etc.) trip generic-api-key.
+[allowlist]
+description = "public test vectors"
+paths = ['''^fixtures/muse/''']
+
 [[rules]]
 id = "email-address"
 description = "Email address — account details must never land in this public repo"
@@ -12,7 +17,7 @@ keywords = ["@"]
 [[rules.allowlists]]
 regexTarget = "match"
 regexes = [
-  '''noreply@anthropic\.com''',
-  '''[A-Za-z0-9._%+-]+@example\.(com|org|net)''',
-  '''[A-Za-z0-9._%+-]+@users\.noreply\.github\.com''',
+  '''^noreply@anthropic\.com$''',
+  '''^[A-Za-z0-9._%+-]+@example\.(com|org|net)$''',
+  '''^[A-Za-z0-9._%+-]+@users\.noreply\.github\.com$''',
 ]

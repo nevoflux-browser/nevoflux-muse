@@ -105,3 +105,9 @@ def test_reset_can_keep_a_file(tmp_path):
 def test_written_json_is_a_plain_object(tmp_path):
     state.write_secret(tmp_path, state.PAIRING_FILE, {"k": "v"})
     assert json.loads((tmp_path / state.PAIRING_FILE).read_text()) == {"k": "v", "v": 1}
+
+
+def test_read_state_invalid_utf8(tmp_path):
+    (tmp_path / state.ACCOUNT_FILE).write_bytes(b"\xff\xfe")
+    with pytest.raises(state.UnsupportedState):
+        state.read_state(tmp_path, state.ACCOUNT_FILE)

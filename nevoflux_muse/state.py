@@ -76,11 +76,10 @@ def write_secret(d: Path, name: str, obj: dict) -> None:
 def read_state(d: Path, name: str, fields: tuple[str, ...] = ()) -> dict | None:
     try:
         text = (d / name).read_text(encoding="utf-8")
+        obj = json.loads(text)
     except FileNotFoundError:
         return None
-    try:
-        obj = json.loads(text)
-    except ValueError:
+    except (ValueError, UnicodeDecodeError):
         raise UnsupportedState(name) from None
     if not isinstance(obj, dict) or obj.get("v") != SCHEMA or any(f not in obj for f in fields):
         raise UnsupportedState(name)

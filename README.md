@@ -6,27 +6,41 @@ The client an AI agent runs (in its own VM) to drive a NevoFlux browser it has
 been paired with. The protocol is documented in the head's repository:
 [`docs/muse-client-protocol.md`](https://github.com/nevoflux-browser/nevoflux-agent/blob/main/docs/muse-client-protocol.md).
 
-Status: skeleton. `nf version`, `nf unpair` and `nf reset` work; pairing, the
-relay bridge and the rest of `nf` arrive with the reference implementation.
+Status: protocol core. `nf pair`, `nf auth begin`, `nf status`, `nf unpair`,
+`nf reset` and `nf version` work, and the client can hold an MCP session with a
+head; the resident bridge, `nf tools` / `nf call` and the installer come next.
+
+## Commands
+
+Every command is non-interactive and takes `--json`.
+
+```sh
+printf '%s\n' '<the block from /pair-agent>' | nf pair --from-stdin
+nf auth begin          # prints a URL and a code for the person to approve
+nf status              # repeat every 5 s until auth is "ok"; state "ready" when done
+```
 
 ## State and uninstalling
 
-The client keeps its pairing (the channel key) and account tokens in one
-directory: `$NF_HOME` if set, else `%LOCALAPPDATA%\nevoflux-muse` on Windows,
-`~/Library/Application Support/nevoflux-muse` on macOS, and
-`$XDG_STATE_HOME/nevoflux-muse` (default `~/.local/state/nevoflux-muse`)
-elsewhere.
+The client keeps its pairing (the channel key), its account token and any sign-in
+in progress in one directory: `$NF_HOME` if set, else `%LOCALAPPDATA%\nevoflux-muse`
+on Windows, `~/Library/Application Support/nevoflux-muse` on macOS, and
+`$XDG_STATE_HOME/nevoflux-muse` (default `~/.local/state/nevoflux-muse`) elsewhere.
 
 - `nf unpair` forgets the paired browser and keeps the account login, ready to
   pair with another one. The browser still lists the agent until you remove it
   in NevoFlux, but without the key the agent can no longer connect.
-- `nf reset` forgets everything. `pip uninstall` does not touch this directory,
-  so uninstall with:
+- `nf reset` revokes the account token on the server, checks that it no longer
+  works, then forgets everything. If it cannot reach the account service it
+  keeps the token and exits 1: run it again later. `pip uninstall` does not
+  touch this directory, so uninstall with:
 
 ```sh
-nf reset
-pip uninstall nevoflux-muse
+nf reset && pip uninstall nevoflux-muse
 ```
+
+Do not uninstall after a failed `nf reset`: the token would stay valid on the
+server. `nf reset --local-only` deletes it locally regardless.
 
 ## Development
 

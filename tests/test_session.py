@@ -1,10 +1,13 @@
 import asyncio
 
+import anyio
 import pytest
 from mcp import MCPError
-from mcp_types import CONNECTION_CLOSED
+from mcp.shared.message import SessionMessage
+from mcp_types import CONNECTION_CLOSED, jsonrpc_message_adapter
 
 from nevoflux_muse.auth import AuthRevoked
+from nevoflux_muse.envelope import Envelope
 from nevoflux_muse.pairing import Pairing
 from nevoflux_muse.session import AccountMismatch, HeadConnection, IncompatibleHead
 from nevoflux_muse.testing import FakeHead, FakeRelay
@@ -181,3 +184,58 @@ async def test_wrong_key_never_connects(relay, head):
         with pytest.raises(asyncio.TimeoutError):
             await conn.session(timeout=1.5)
         assert conn.state in ("connecting", "head_offline")
+
+
+async def test_a_superseded_session_sends_nothing_under_the_new_challenge(relay, head):
+    async with HeadConnection(pairing(relay), fixed_token, **FAST) as conn:
+        s1 = await conn.session(timeout=5)
+        call = asyncio.create_task(s1.call_tool("hang", {}))
+        await until(lambda: any((m.get("params") or {}).get("name") == "hang" for m in head.requests))
+        mark = len(head.requests)
+        await head.rechallenge()
+        with pytest.raises(MCPError):
+            await asyncio.wait_for(call, 5)
+        await conn.session(timeout=5)
+        assert head.requests[mark]["method"] == "initialize"
+
+
+async def test_pump_drops_messages_once_its_challenge_is_superseded():
+    sent = []
+
+    class Link:
+        async def send(self, obj):
+            sent.append(obj)
+
+        async def close(self):
+            pass
+
+    def challenge(ch):
+        return {"d": "h2c", "n": 0, "ch": ch, "m": None}
+
+    env = Envelope(set())
+    env.inbound(challenge("a"))
+    conn = HeadConnection(Pairing("ws://x", CHANNEL, KEY), fixed_token)
+    read_w, read_r = anyio.create_memory_object_stream(8)
+    write_w, write_r = anyio.create_memory_object_stream(8)
+    task = asyncio.create_task(conn._session_main(Link(), env, "a", read_r, write_w, write_r,
+                                                  asyncio.Event()))
+    await until(lambda: len(sent) == 1)  # the session's initialize, sealed under "a"
+    assert sent[0]["frame"]["ch"] == "a"
+    env.inbound(challenge("b"))
+    note = jsonrpc_message_adapter.validate_python(
+        {"jsonrpc": "2.0", "method": "notifications/initialized"}, by_name=False)
+    await write_w.send(SessionMessage(note))
+    await asyncio.sleep(0.2)
+    assert len(sent) == 1
+    await read_w.aclose()
+    await asyncio.wait_for(task, 5)
+
+
+async def test_a_failing_token_provider_is_fatal(relay):
+    async def provider():
+        raise ValueError("bad state file")
+
+    async with HeadConnection(pairing(relay), provider, **FAST) as conn:
+        with pytest.raises(ValueError):
+            await conn.session(timeout=5)
+        assert conn.state == "error"

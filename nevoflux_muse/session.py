@@ -119,6 +119,13 @@ class HeadConnection:
         self._changed = asyncio.Event()
 
     async def _run(self) -> None:
+        try:
+            await self._dial_loop()
+        except Exception as e:  # noqa: BLE001 - whatever escapes must not leave session() waiting
+            log.error("connection loop failed: %s: %s", type(e).__name__, e)
+            self._set("error", fatal=e)
+
+    async def _dial_loop(self) -> None:
         delay = self._backoff_initial
         refused = 0
         while True:
@@ -192,7 +199,7 @@ class HeadConnection:
                 if isinstance(result, Challenge):
                     deadline = None
                     await self._drop_session()
-                    self._start_session(link, env)
+                    self._start_session(link, env, env.challenge)
                 elif isinstance(result, Message):
                     await self._deliver(result.m)
                 else:
@@ -200,18 +207,20 @@ class HeadConnection:
         finally:
             await self._drop_session()
 
-    def _start_session(self, link: RelayLink, env: Envelope) -> None:
+    def _start_session(self, link: RelayLink, env: Envelope, challenge: str) -> None:
         read_w, read_r = anyio.create_memory_object_stream[SessionMessage | Exception](STREAM_BUFFER)
         write_w, write_r = anyio.create_memory_object_stream[SessionMessage](STREAM_BUFFER)
         self._read_w = read_w
         self._stop = asyncio.Event()
         self._session_task = asyncio.create_task(
-            self._session_main(link, env, read_r, write_w, write_r, self._stop))
+            self._session_main(link, env, challenge, read_r, write_w, write_r, self._stop))
 
-    async def _session_main(self, link, env, read_r, write_w, write_r, stop) -> None:
+    async def _session_main(self, link, env, challenge, read_r, write_w, write_r, stop) -> None:
         async def pump() -> None:
             async with write_r:
                 async for sm in write_r:
+                    if env.challenge != challenge:
+                        continue  # superseded: never seal under the new challenge
                     m = sm.message.model_dump(by_alias=True, exclude_unset=True, mode="json")
                     try:
                         await link.send({"k": "frame", "frame": env.outbound(m)})

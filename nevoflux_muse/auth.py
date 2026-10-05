@@ -14,10 +14,12 @@ makes better-auth demand an Origin header (403 MISSING_OR_NULL_ORIGIN).
 from __future__ import annotations
 
 import asyncio
+import http.client
 import json
 import os
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -29,9 +31,10 @@ DEFAULT_ACCOUNT_URL = "https://nevoflux.app"
 CLIENT_ID = "nevoflux-muse"
 GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
 TIMEOUT = 10
-ACCOUNT_FIELDS = ("base_url", "access_token")
-PENDING_FIELDS = ("base_url", "device_code", "user_code", "verification_uri",
-                  "verification_uri_complete", "interval", "expires_at", "next_poll_at")
+ACCOUNT_FIELDS = {"base_url": str, "access_token": str}
+PENDING_FIELDS = {"base_url": str, "device_code": str, "user_code": str, "verification_uri": str,
+                  "verification_uri_complete": str, "interval": state.NUMBER,
+                  "expires_at": state.NUMBER, "next_poll_at": state.NUMBER}
 
 
 class AccountError(Exception):
@@ -86,6 +89,9 @@ class Failed:
 
 class AccountClient:
     def __init__(self, base_url: str):
+        url = urllib.parse.urlparse(base_url)
+        if url.scheme not in ("http", "https") or not url.hostname:
+            raise AccountError("the account service URL must be an http(s):// URL")
         self.base_url = base_url.rstrip("/")
 
     def _request(self, method: str, path: str, body: dict | None = None,
@@ -105,6 +111,9 @@ class AccountClient:
         except (urllib.error.URLError, OSError) as e:
             reason = getattr(e, "reason", e)
             raise AccountUnreachable(f"cannot reach {self.base_url}: {reason}") from None
+        except http.client.HTTPException as e:  # a malformed status line, a truncated body
+            raise AccountUnreachable(
+                f"{self.base_url} sent a broken reply ({type(e).__name__})") from None
         if status >= 500:
             raise AccountUnreachable(f"{self.base_url} answered HTTP {status}")
         try:

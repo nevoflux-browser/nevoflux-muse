@@ -96,3 +96,11 @@ def test_failed_pairing_writes_nothing(tmp_path):
 
 def test_load_pairing_absent(tmp_path):
     assert pairing.load_pairing(tmp_path) is None
+
+
+@pytest.mark.parametrize("key", ["not base64!", "AA==", "", base64.b64encode(bytes(33)).decode()])
+def test_load_pairing_rejects_a_bad_key(tmp_path, key):
+    state.write_secret(tmp_path, state.PAIRING_FILE,
+                       {"relay": "wss://r", "channel": "c", "key": key})
+    with pytest.raises(state.UnsupportedState):
+        pairing.load_pairing(tmp_path)

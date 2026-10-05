@@ -307,3 +307,78 @@ def test_reset_with_a_corrupt_account_file(home, capsys):
     assert code == 1 and out["revoked"] is False
     assert "nf reset --local-only" in out["error"]
     assert (home / ACCOUNT_FILE).exists()
+
+
+def test_status_never_prints_secrets_as_json(home, account, capsys, clock):
+    account.valid.add("tok-secret")
+    st.write_secret(home, ACCOUNT_FILE, {"base_url": account.url, "access_token": "tok-secret"})
+    run_json(capsys, "auth", "begin", "--reset")
+    clock["now"] = T0 + 1
+    assert main(["status", "--json"]) == 0
+    printed = capsys.readouterr().out
+    assert "tok-secret" not in printed and "dev-1" not in printed
+
+
+def test_status_text_shows_the_last_error(home, account, capsys, clock):
+    run_json(capsys, "auth", "begin")
+    st.write_secret(home, PAIRING_FILE, {"relay": "wss://r", "channel": "c", "key": "AA=="})
+    account.polls = ["denied"]
+    clock["now"] = T0 + 5
+    assert main(["status"]) == 0
+    out = capsys.readouterr().out
+    assert "Not signed in" in out and "access_denied" in out
+
+
+def test_status_text_shows_the_poll_error(home, capsys, clock):
+    st.write_secret(home, st.AUTH_PENDING_FILE, {
+        "base_url": DEAD_URL, "device_code": "d", "user_code": "U", "verification_uri": "v",
+        "verification_uri_complete": "vc", "interval": 5, "expires_at": T0 + 100,
+        "next_poll_at": T0})
+    assert main(["status"]) == 0
+    out = capsys.readouterr().out
+    assert "Waiting for approval" in out and "cannot reach" in out
+
+
+def test_status_with_a_mistyped_pending_file(home, capsys):
+    st.write_secret(home, st.AUTH_PENDING_FILE, {
+        "base_url": "http://x", "device_code": "d", "user_code": "U", "verification_uri": "v",
+        "verification_uri_complete": "vc", "interval": 5, "expires_at": "soon",
+        "next_poll_at": 0})
+    code, out = run_json(capsys, "status")
+    assert code == 1
+    assert st.AUTH_PENDING_FILE in out["error"] and "nf reset --local-only" in out["error"]
+
+
+@pytest.mark.parametrize("base_url", [5, "not a url"])
+def test_reset_with_a_bad_base_url_keeps_the_account(home, capsys, base_url):
+    st.write_secret(home, ACCOUNT_FILE, {"base_url": base_url, "access_token": "tok-1"})
+    code, out = run_json(capsys, "reset")
+    assert code == 1 and out["revoked"] is False and "error" in out
+    assert (home / ACCOUNT_FILE).exists()
+
+
+def test_reset_survives_an_os_error(home, capsys, monkeypatch):
+    write_account(home, "http://x")
+
+    def boom(d):
+        raise PermissionError("secret-xyz denied")
+
+    monkeypatch.setattr(auth, "revoke_and_verify", boom)
+    code, out = run_json(capsys, "reset")
+    assert code == 1 and out["revoked"] is False
+    assert (home / ACCOUNT_FILE).exists()
+
+
+@pytest.mark.parametrize("flags", [["--json"], []])
+def test_an_unexpected_error_prints_only_its_type(home, capsys, monkeypatch, flags):
+    def boom(d):
+        raise RuntimeError("secret-xyz")
+
+    monkeypatch.setattr(auth, "poll_if_due", boom)
+    assert main(["status", *flags]) == 1
+    cap = capsys.readouterr()
+    assert "secret-xyz" not in cap.out + cap.err
+    if flags:
+        assert json.loads(cap.out) == {"error": "unexpected RuntimeError"}
+    else:
+        assert "nf: unexpected RuntimeError" in cap.err

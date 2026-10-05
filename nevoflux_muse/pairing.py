@@ -22,7 +22,7 @@ from pathlib import Path
 
 from . import crypto, state
 
-PAIRING_FIELDS = ("relay", "channel", "key")
+PAIRING_FIELDS = {"relay": str, "channel": str, "key": str}
 _LOCAL_HOSTS = ("127.0.0.1", "localhost")
 
 
@@ -88,5 +88,10 @@ def load_pairing(d: Path) -> Pairing | None:
     obj = state.read_state(d, state.PAIRING_FILE, PAIRING_FIELDS)
     if obj is None:
         return None
-    return Pairing(obj["relay"], obj["channel"],
-                   base64.b64decode(obj["key"]))
+    try:
+        key = base64.b64decode(obj["key"], validate=True)
+    except ValueError:  # binascii.Error
+        raise state.UnsupportedState(state.PAIRING_FILE) from None
+    if len(key) != 32:
+        raise state.UnsupportedState(state.PAIRING_FILE)
+    return Pairing(obj["relay"], obj["channel"], key)

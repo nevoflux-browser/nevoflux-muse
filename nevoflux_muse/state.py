@@ -21,6 +21,7 @@ import json
 import os
 import sys
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
 
 APP = "nevoflux-muse"
@@ -29,6 +30,7 @@ ACCOUNT_FILE = "account.json"
 AUTH_PENDING_FILE = "auth_pending.json"
 KNOWN_FILES = (ACCOUNT_FILE, AUTH_PENDING_FILE, PAIRING_FILE)
 SCHEMA = 1
+NUMBER = (int, float)  # a field type: JSON numbers (never bool)
 
 
 class UnsupportedState(Exception):
@@ -73,7 +75,10 @@ def write_secret(d: Path, name: str, obj: dict) -> None:
         raise
 
 
-def read_state(d: Path, name: str, fields: tuple[str, ...] = ()) -> dict | None:
+def read_state(d: Path, name: str, fields: Mapping[str, type | tuple[type, ...]] | None = None
+               ) -> dict | None:
+    """The file's object, None if absent. `fields` maps each required name to its type: a
+    missing field or a value of the wrong type is as unreadable as bad JSON."""
     try:
         text = (d / name).read_text(encoding="utf-8")
         obj = json.loads(text)
@@ -81,8 +86,12 @@ def read_state(d: Path, name: str, fields: tuple[str, ...] = ()) -> dict | None:
         return None
     except (ValueError, UnicodeDecodeError):
         raise UnsupportedState(name) from None
-    if not isinstance(obj, dict) or obj.get("v") != SCHEMA or any(f not in obj for f in fields):
+    if not isinstance(obj, dict) or obj.get("v") != SCHEMA:
         raise UnsupportedState(name)
+    for field, kind in (fields or {}).items():
+        value = obj.get(field)
+        if isinstance(value, bool) or not isinstance(value, kind):
+            raise UnsupportedState(name)
     return obj
 
 

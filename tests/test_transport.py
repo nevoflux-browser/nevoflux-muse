@@ -1,4 +1,5 @@
 import asyncio
+import logging
 
 import pytest
 
@@ -82,3 +83,14 @@ async def test_unreachable_hides_the_token():
     with pytest.raises(RelayUnreachable) as e:
         await RelayLink.connect("ws://127.0.0.1:9", "c", "secret-jwt", KEY, open_timeout=2)
     assert "secret-jwt" not in str(e.value)
+
+
+async def test_the_jwt_never_reaches_a_log(relay, caplog):
+    caplog.set_level(logging.DEBUG)
+    link = await RelayLink.connect(relay.url, "c", "secret-jwt-XYZ", KEY)
+    await recv(link)
+    await link.close()
+    # The in-process relay is a server and logs what it receives; only our side is checked.
+    ours = [r for r in caplog.records if not r.name.startswith("websockets.server")]
+    assert any("GET" in r.getMessage() for r in ours)  # the request line is still logged ...
+    assert all("secret-jwt-XYZ" not in r.getMessage() for r in ours)  # ... minus the token

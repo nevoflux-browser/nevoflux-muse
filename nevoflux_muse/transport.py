@@ -10,6 +10,8 @@ the library's exception text (which can quote it) ever reaches a message.
 from __future__ import annotations
 
 import json
+import logging
+import re
 import urllib.parse
 from dataclasses import dataclass
 
@@ -19,6 +21,20 @@ from websockets.exceptions import InvalidStatus
 from . import crypto
 
 MAX_MESSAGE = 64 * 1024 * 1024  # screenshots travel as base64
+_TOKEN_PARAM = re.compile(r"([?&]t=)[^&\s]*")
+
+
+class _RedactToken(logging.Filter):
+    """The library logs the request line at DEBUG, JWT included."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.msg = _TOKEN_PARAM.sub(r"\1<redacted>", record.getMessage())
+        record.args = None
+        return True
+
+
+_ws_log = logging.getLogger("nevoflux_muse.relay.ws")
+_ws_log.addFilter(_RedactToken())
 
 
 @dataclass(frozen=True)
@@ -48,7 +64,8 @@ class RelayLink:
                       open_timeout: float = 10) -> RelayLink:
         url = f"{relay}/?{urllib.parse.urlencode({'c': channel, 't': token})}"
         try:
-            ws = await connect(url, open_timeout=open_timeout, max_size=MAX_MESSAGE)
+            ws = await connect(url, open_timeout=open_timeout, max_size=MAX_MESSAGE,
+                               logger=_ws_log)
         except InvalidStatus as e:
             raise RelayRefused(e.response.status_code) from None
         except Exception as e:  # noqa: BLE001 - its text may quote the URL

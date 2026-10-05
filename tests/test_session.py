@@ -9,8 +9,14 @@ from mcp_types import CONNECTION_CLOSED, jsonrpc_message_adapter
 from nevoflux_muse.auth import AuthRevoked
 from nevoflux_muse.envelope import Envelope
 from nevoflux_muse.pairing import Pairing
-from nevoflux_muse.session import AccountMismatch, HeadConnection, IncompatibleHead
+from nevoflux_muse.session import (
+    AccountMismatch,
+    HeadConnection,
+    IncompatibleHead,
+    RelayRejected,
+)
 from nevoflux_muse.testing import FakeHead, FakeRelay
+from nevoflux_muse.transport import RelayLink, RelayRefused
 
 KEY = bytes(range(32))
 CHANNEL = "chan-1"
@@ -239,3 +245,32 @@ async def test_a_failing_token_provider_is_fatal(relay):
         with pytest.raises(ValueError):
             await conn.session(timeout=5)
         assert conn.state == "error"
+
+
+def patch_connect(monkeypatch, statuses):
+    """Make RelayLink.connect refuse with each status in turn, then behave."""
+    real = RelayLink.connect
+    todo = list(statuses)
+
+    async def connect(*args, **kwargs):
+        if todo:
+            raise RelayRefused(todo.pop(0))
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(RelayLink, "connect", connect)
+
+
+async def test_relay_400_is_fatal(relay, monkeypatch):
+    patch_connect(monkeypatch, [400])
+    async with HeadConnection(pairing(relay), fixed_token, **FAST) as conn:
+        with pytest.raises(RelayRejected):
+            await conn.session(timeout=5)
+        assert conn.state == "relay_refused"
+
+
+@pytest.mark.parametrize("status", [404, 429, 503])
+async def test_other_relay_statuses_are_retried(relay, head, monkeypatch, status):
+    patch_connect(monkeypatch, [status] * 4)
+    async with HeadConnection(pairing(relay), fixed_token, **FAST) as conn:
+        await conn.session(timeout=5)
+        assert conn.state == "connected"

@@ -150,10 +150,12 @@ class HeadConnection:
                         "another NevoFlux account owns this channel; sign in with the account "
                         "the browser uses (`nf auth begin --reset`)"))
                     return
-                else:
+                elif e.status == 400:
                     self._set("relay_refused", fatal=RelayRejected(
-                        f"the relay refused the channel (HTTP {e.status}); pair again"))
+                        "the relay refused the channel (HTTP 400); pair again"))
                     return
+                else:
+                    log.warning("the relay answered HTTP %s; retrying", e.status)
             except (AccountError, RelayUnreachable) as e:
                 log.warning("cannot connect: %s", e)
             else:

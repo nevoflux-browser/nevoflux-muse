@@ -162,3 +162,34 @@ def test_token_provider(tmp_path, account):
 def test_token_provider_without_account(tmp_path):
     with pytest.raises(auth.AuthRevoked):
         asyncio.run(auth.token_provider(tmp_path)())
+
+
+@pytest.mark.parametrize("url", ["not a url", "ftp://x", "", "//host"])
+def test_account_client_needs_an_http_url(url):
+    with pytest.raises(auth.AccountError):
+        auth.AccountClient(url)
+
+
+@pytest.mark.parametrize("reply", [b"garbage\r\n\r\n",
+                                   b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nshort"])
+def test_a_malformed_reply_is_unreachable(reply):
+    import socket
+    import threading
+
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+
+    def serve():
+        conn, _ = srv.accept()
+        conn.recv(4096)
+        conn.sendall(reply)
+        conn.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    try:
+        with pytest.raises(auth.AccountUnreachable) as e:
+            auth.AccountClient(f"http://127.0.0.1:{srv.getsockname()[1]}").device_code()
+        assert "127.0.0.1" in str(e.value) and "secret" not in str(e.value)
+    finally:
+        srv.close()

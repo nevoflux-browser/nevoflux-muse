@@ -55,7 +55,8 @@ def test_linux_ignores_a_relative_xdg_state_home(monkeypatch, clean_env):
 def test_write_and_read_secret(tmp_path):
     d = tmp_path / "nf"
     state.write_secret(d, state.PAIRING_FILE, {"relay": "wss://r", "channel": "c"})
-    assert state.read_state(d, state.PAIRING_FILE, ("relay", "channel")) == {
+    assert state.read_state(d, state.PAIRING_FILE,
+                            {"relay": str, "channel": str}) == {
         "relay": "wss://r", "channel": "c", "v": 1}
     assert [p.name for p in d.iterdir()] == [state.PAIRING_FILE]  # no temp file left
 
@@ -82,7 +83,7 @@ def test_read_state_rejects_garbage(tmp_path, content):
 def test_read_state_requires_fields(tmp_path):
     state.write_secret(tmp_path, state.ACCOUNT_FILE, {"base_url": "x"})
     with pytest.raises(state.UnsupportedState):
-        state.read_state(tmp_path, state.ACCOUNT_FILE, ("base_url", "access_token"))
+        state.read_state(tmp_path, state.ACCOUNT_FILE, {"base_url": str, "access_token": str})
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissions")
@@ -111,3 +112,24 @@ def test_read_state_invalid_utf8(tmp_path):
     (tmp_path / state.ACCOUNT_FILE).write_bytes(b"\xff\xfe")
     with pytest.raises(state.UnsupportedState):
         state.read_state(tmp_path, state.ACCOUNT_FILE)
+
+
+@pytest.mark.parametrize("value", [5, None, True, ["x"]])
+def test_read_state_checks_field_types(tmp_path, value):
+    state.write_secret(tmp_path, state.ACCOUNT_FILE, {"base_url": value})
+    with pytest.raises(state.UnsupportedState):
+        state.read_state(tmp_path, state.ACCOUNT_FILE, {"base_url": str})
+
+
+@pytest.mark.parametrize("value", [3, 2.5])
+def test_read_state_numbers_are_int_or_float(tmp_path, value):
+    state.write_secret(tmp_path, state.ACCOUNT_FILE, {"interval": value})
+    got = state.read_state(tmp_path, state.ACCOUNT_FILE, {"interval": state.NUMBER})
+    assert got["interval"] == value
+
+
+@pytest.mark.parametrize("value", ["soon", True, None])
+def test_read_state_numbers_reject_the_rest(tmp_path, value):
+    state.write_secret(tmp_path, state.ACCOUNT_FILE, {"interval": value})
+    with pytest.raises(state.UnsupportedState):
+        state.read_state(tmp_path, state.ACCOUNT_FILE, {"interval": state.NUMBER})

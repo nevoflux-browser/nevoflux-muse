@@ -54,7 +54,7 @@ def _reset(args: argparse.Namespace) -> int:
     if not args.local_only:
         try:
             revoked = auth.revoke_and_verify(d) or None
-        except (auth.AccountError, state.UnsupportedState) as e:
+        except (auth.AccountError, state.UnsupportedState, OSError) as e:
             revoked, error = False, str(e)
     try:
         removed, left = state.reset(d, keep=(state.ACCOUNT_FILE,) if revoked is False else ())
@@ -147,7 +147,12 @@ def _status(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps({"state": out.pop("state"), **out}))
     else:
-        print(_STATUS_TEXT[out["state"]].format(**out))
+        text = _STATUS_TEXT[out["state"]].format(**out)
+        if "last_error" in out:
+            text += f" (last attempt: {out['last_error']})"
+        if "poll_error" in out:
+            text += f" ({out['poll_error']})"
+        print(text)
     return 0
 
 
@@ -194,7 +199,15 @@ def main(argv: list[str] | None = None) -> int:
     if not hasattr(args, "run"):
         parser.print_usage(sys.stderr)
         return 2
-    return args.run(args)
+    try:
+        return args.run(args)
+    except Exception as e:  # noqa: BLE001 - last resort; str(e) could carry a secret
+        name = type(e).__name__
+        if getattr(args, "json", False):
+            print(json.dumps({"error": f"unexpected {name}"}))
+        else:
+            print(f"nf: unexpected {name}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

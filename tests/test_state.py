@@ -1,3 +1,5 @@
+import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -48,3 +50,58 @@ def test_linux_ignores_a_relative_xdg_state_home(monkeypatch, clean_env):
     monkeypatch.setattr(state.sys, "platform", "linux")
     monkeypatch.setenv("XDG_STATE_HOME", "relative/state")
     assert state.state_dir() == clean_env / "home" / ".local" / "state" / "nevoflux-muse"
+
+
+def test_write_and_read_secret(tmp_path):
+    d = tmp_path / "nf"
+    state.write_secret(d, state.PAIRING_FILE, {"relay": "wss://r", "channel": "c"})
+    assert state.read_state(d, state.PAIRING_FILE, ("relay", "channel")) == {
+        "relay": "wss://r", "channel": "c", "v": 1}
+    assert [p.name for p in d.iterdir()] == [state.PAIRING_FILE]  # no temp file left
+
+
+def test_read_state_absent(tmp_path):
+    assert state.read_state(tmp_path, state.ACCOUNT_FILE) is None
+
+
+def test_write_secret_replaces(tmp_path):
+    state.write_secret(tmp_path, state.ACCOUNT_FILE, {"a": 1})
+    state.write_secret(tmp_path, state.ACCOUNT_FILE, {"a": 2})
+    assert state.read_state(tmp_path, state.ACCOUNT_FILE)["a"] == 2
+
+
+@pytest.mark.parametrize("content", ["", "{", "[1]", '{"v": 2}', '{"a": 1}'])
+def test_read_state_rejects_garbage(tmp_path, content):
+    (tmp_path / state.ACCOUNT_FILE).write_text(content)
+    with pytest.raises(state.UnsupportedState) as e:
+        state.read_state(tmp_path, state.ACCOUNT_FILE)
+    assert state.ACCOUNT_FILE in str(e.value)
+    assert "nf reset --local-only" in str(e.value)
+
+
+def test_read_state_requires_fields(tmp_path):
+    state.write_secret(tmp_path, state.ACCOUNT_FILE, {"base_url": "x"})
+    with pytest.raises(state.UnsupportedState):
+        state.read_state(tmp_path, state.ACCOUNT_FILE, ("base_url", "access_token"))
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissions")
+def test_secret_permissions(tmp_path):
+    d = tmp_path / "nf"
+    state.write_secret(d, state.ACCOUNT_FILE, {"a": 1})
+    assert d.stat().st_mode & 0o777 == 0o700
+    assert (d / state.ACCOUNT_FILE).stat().st_mode & 0o777 == 0o600
+
+
+def test_reset_can_keep_a_file(tmp_path):
+    for name in state.KNOWN_FILES:
+        state.write_secret(tmp_path, name, {})
+    removed, left = state.reset(tmp_path, keep=(state.ACCOUNT_FILE,))
+    assert removed == [state.AUTH_PENDING_FILE, state.PAIRING_FILE]
+    assert left == [state.ACCOUNT_FILE]
+    assert tmp_path.exists()
+
+
+def test_written_json_is_a_plain_object(tmp_path):
+    state.write_secret(tmp_path, state.PAIRING_FILE, {"k": "v"})
+    assert json.loads((tmp_path / state.PAIRING_FILE).read_text()) == {"k": "v", "v": 1}

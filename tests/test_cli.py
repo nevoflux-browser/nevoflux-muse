@@ -1,3 +1,4 @@
+import io
 import json
 from pathlib import Path
 
@@ -90,3 +91,38 @@ def test_reset_failure_is_reported(home, capsys, monkeypatch):
     monkeypatch.setattr(Path, "unlink", refuse)
     assert main(["reset", "--json"]) == 1
     assert "denied" in json.loads(capsys.readouterr().out)["error"]
+
+
+PAIR_BLOCK = (
+    "NEVOFLUX_AGENT_PAIRING\n"
+    "relay: wss://relay.nevoflux.app\n"
+    "channel: 2f1c4a90-7b3e-4d1a-9c58-0e6a2b7d4f31\n"
+    "code: A-BCDE-FGHJ-KMNP\n"
+)
+
+
+def test_pair_from_stdin(home, capsys, monkeypatch):
+    monkeypatch.setattr("sys.stdin", io.StringIO(PAIR_BLOCK))
+    assert main(["pair", "--from-stdin", "--json"]) == 0
+    out = capsys.readouterr().out
+    assert json.loads(out) == {
+        "paired": True,
+        "relay": "wss://relay.nevoflux.app",
+        "channel": "2f1c4a90-7b3e-4d1a-9c58-0e6a2b7d4f31"
+    }
+    assert "BCDE" not in out
+    assert (home / PAIRING_FILE).exists()
+
+
+def test_pair_rejects_a_bad_block(home, capsys, monkeypatch):
+    monkeypatch.setattr("sys.stdin",
+                        io.StringIO(PAIR_BLOCK.replace("KMNP", "KMN")))
+    assert main(["pair", "--from-stdin", "--json"]) == 1
+    assert "error" in json.loads(capsys.readouterr().out)
+    assert not home.exists()
+
+
+def test_pair_requires_from_stdin(home, capsys):
+    with pytest.raises(SystemExit) as e:
+        main(["pair"])
+    assert e.value.code == 2

@@ -10,7 +10,7 @@ import argparse
 import json
 import sys
 
-from . import PROTOCOL_MAX, PROTOCOL_MIN, __version__, state
+from . import PROTOCOL_MAX, PROTOCOL_MIN, __version__, pairing, state
 
 
 def _version(args: argparse.Namespace) -> int:
@@ -22,7 +22,7 @@ def _version(args: argparse.Namespace) -> int:
     return 0
 
 
-def _failed(args: argparse.Namespace, e: OSError) -> int:
+def _failed(args: argparse.Namespace, e: Exception) -> int:
     if args.json:
         print(json.dumps({"error": str(e)}))
     else:
@@ -62,6 +62,20 @@ def _reset(args: argparse.Namespace) -> int:
     return 0
 
 
+def _pair(args: argparse.Namespace) -> int:
+    d = state.state_dir()
+    try:
+        block = pairing.pair(sys.stdin.read(), d)
+    except (ValueError, OSError) as e:
+        return _failed(args, e)
+    if args.json:
+        print(json.dumps({"paired": True, "relay": block.relay,
+                          "channel": block.channel}))
+    else:
+        print(f"Paired with channel {block.channel} on {block.relay}.")
+    return 0
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="nf")
     sub = parser.add_subparsers(dest="command")
@@ -73,6 +87,13 @@ def _parser() -> argparse.ArgumentParser:
         cmd = sub.add_parser(name, help=summary)
         cmd.add_argument("--json", action="store_true")
         cmd.set_defaults(run=run)
+    pair_cmd = sub.add_parser("pair",
+                              help="pair with a browser: pipe in the block from /pair-agent")
+    pair_cmd.add_argument("--from-stdin", action="store_true",
+                          required=True,
+                          help="read the pairing block from stdin (never from an argument)")
+    pair_cmd.add_argument("--json", action="store_true")
+    pair_cmd.set_defaults(run=_pair)
     return parser
 
 

@@ -107,9 +107,29 @@ def stop(d: Path, timeout: float = 5.0) -> bool:
     except ipc.BridgeDown:
         return False
     deadline = time.monotonic() + timeout
-    while alive(d) and time.monotonic() < deadline:
+    while _still_running(d) and time.monotonic() < deadline:
         time.sleep(0.05)
     return True
+
+
+def _still_running(d: Path) -> bool:
+    """Answering, or not yet done tidying up: the socket file is removed and the lock
+    released only as the process finishes, and a restart straight after must not race it."""
+    import fcntl
+
+    if alive(d) or ipc.socket_path(d).exists():
+        return True
+    try:
+        fd = os.open(d / LOCK_FILE, os.O_RDWR)
+    except FileNotFoundError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True
+    finally:
+        os.close(fd)
+    return False
 
 
 def _setup_logging(d: Path) -> None:

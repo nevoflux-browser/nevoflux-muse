@@ -382,3 +382,12 @@ def test_an_unexpected_error_prints_only_its_type(home, capsys, monkeypatch, fla
         assert json.loads(cap.out) == {"error": "unexpected RuntimeError"}
     else:
         assert "nf: unexpected RuntimeError" in cap.err
+
+
+def test_status_with_a_bad_pending_url(home, capsys, clock):
+    st.write_secret(home, st.AUTH_PENDING_FILE, {
+        "base_url": "ftp://x", "device_code": "d", "user_code": "U", "verification_uri": "v",
+        "verification_uri_complete": "vc", "interval": 5, "expires_at": T0 + 100,
+        "next_poll_at": T0})
+    code, out = run_json(capsys, "status")
+    assert code == 1 and st.AUTH_PENDING_FILE in out["error"]

@@ -1,4 +1,7 @@
 import asyncio
+import re
+import socket
+import threading
 
 import pytest
 from conftest import DEAD_URL
@@ -164,32 +167,55 @@ def test_token_provider_without_account(tmp_path):
         asyncio.run(auth.token_provider(tmp_path)())
 
 
+def test_token_provider_with_a_bad_base_url(tmp_path):
+    account_file(tmp_path, "not a url")
+    with pytest.raises(state.UnsupportedState) as e:
+        asyncio.run(auth.token_provider(tmp_path)())
+    assert state.ACCOUNT_FILE in str(e.value)
+
+
 @pytest.mark.parametrize("url", ["not a url", "ftp://x", "", "//host"])
 def test_account_client_needs_an_http_url(url):
     with pytest.raises(auth.AccountError):
         auth.AccountClient(url)
 
 
+def test_poll_if_due_with_a_bad_base_url(tmp_path, clock):
+    state.write_secret(tmp_path, state.AUTH_PENDING_FILE, {
+        "base_url": "ftp://x", "device_code": "d", "user_code": "U", "verification_uri": "v",
+        "verification_uri_complete": "vc", "interval": 5, "expires_at": T0 + 100,
+        "next_poll_at": T0})
+    with pytest.raises(state.UnsupportedState) as e:
+        auth.poll_if_due(tmp_path)
+    assert state.AUTH_PENDING_FILE in str(e.value)
+
+
 @pytest.mark.parametrize("reply", [b"garbage\r\n\r\n",
                                    b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nshort"])
 def test_a_malformed_reply_is_unreachable(reply):
-    import socket
-    import threading
-
     srv = socket.socket()
     srv.bind(("127.0.0.1", 0))
     srv.listen(1)
 
     def serve():
         conn, _ = srv.accept()
-        conn.recv(4096)
-        conn.sendall(reply)
-        conn.close()
+        with conn:
+            data = b""
+            while b"\r\n\r\n" not in data:
+                data += conn.recv(4096)
+            head, _, body = data.partition(b"\r\n\r\n")
+            length = int(re.search(rb"content-length: *(\d+)", head, re.IGNORECASE).group(1))
+            while len(body) < length:
+                body += conn.recv(4096)
+            conn.sendall(reply)
+            conn.shutdown(socket.SHUT_WR)
+            while conn.recv(4096):
+                pass
 
     threading.Thread(target=serve, daemon=True).start()
     try:
         with pytest.raises(auth.AccountUnreachable) as e:
             auth.AccountClient(f"http://127.0.0.1:{srv.getsockname()[1]}").device_code()
-        assert "127.0.0.1" in str(e.value) and "secret" not in str(e.value)
+        assert "broken reply" in str(e.value) and "secret" not in str(e.value)
     finally:
         srv.close()

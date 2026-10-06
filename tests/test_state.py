@@ -133,3 +133,10 @@ def test_read_state_numbers_reject_the_rest(tmp_path, value):
     state.write_secret(tmp_path, state.ACCOUNT_FILE, {"interval": value})
     with pytest.raises(state.UnsupportedState):
         state.read_state(tmp_path, state.ACCOUNT_FILE, {"interval": state.NUMBER})
+
+
+@pytest.mark.parametrize("value", ["NaN", "Infinity", "-Infinity"])
+def test_read_state_rejects_non_finite_numbers(tmp_path, value):
+    (tmp_path / state.AUTH_PENDING_FILE).write_text(f'{{"v": 1, "interval": {value}}}')
+    with pytest.raises(state.UnsupportedState):
+        state.read_state(tmp_path, state.AUTH_PENDING_FILE, {"interval": state.NUMBER})

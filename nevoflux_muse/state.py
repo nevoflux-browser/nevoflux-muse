@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import sys
 import tempfile
@@ -91,6 +92,8 @@ def read_state(d: Path, name: str, fields: Mapping[str, type | tuple[type, ...]]
     for field, kind in (fields or {}).items():
         value = obj.get(field)
         if isinstance(value, bool) or not isinstance(value, kind):
+            raise UnsupportedState(name)
+        if isinstance(value, float) and not math.isfinite(value):
             raise UnsupportedState(name)
     return obj
 

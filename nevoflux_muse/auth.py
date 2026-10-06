@@ -210,7 +210,11 @@ def poll_if_due(d: Path) -> PollOutcome | None:
     if t < pending["next_poll_at"]:
         return PollOutcome("pending")
     try:
-        result = AccountClient(pending["base_url"]).poll(pending["device_code"])
+        client = AccountClient(pending["base_url"])
+    except AccountError:
+        raise state.UnsupportedState(state.AUTH_PENDING_FILE) from None
+    try:
+        result = client.poll(pending["device_code"])
     except AccountUnreachable as e:
         return PollOutcome("pending", poll_error=str(e))
     if isinstance(result, Approved):
@@ -251,7 +255,10 @@ def token_provider(d: Path) -> Callable[[], Awaitable[str]]:
         account = state.read_state(d, state.ACCOUNT_FILE, ACCOUNT_FIELDS)
         if account is None:
             raise AuthRevoked("not authorized; run `nf auth begin`")
-        client = AccountClient(account["base_url"])
+        try:
+            client = AccountClient(account["base_url"])
+        except AccountError:
+            raise state.UnsupportedState(state.ACCOUNT_FILE) from None
         return await asyncio.to_thread(client.mint_jwt, account["access_token"])
 
     return provide

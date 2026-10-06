@@ -98,7 +98,7 @@ def test_reset_can_keep_a_file(tmp_path):
     for name in state.KNOWN_FILES:
         state.write_secret(tmp_path, name, {})
     removed, left = state.reset(tmp_path, keep=(state.ACCOUNT_FILE,))
-    assert removed == [state.AUTH_PENDING_FILE, state.PAIRING_FILE]
+    assert removed == [n for n in state.KNOWN_FILES if n != state.ACCOUNT_FILE]
     assert left == [state.ACCOUNT_FILE]
     assert tmp_path.exists()
 

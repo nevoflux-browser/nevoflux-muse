@@ -22,6 +22,15 @@ def _version(args: argparse.Namespace) -> int:
     return 0
 
 
+def _daemon(args: argparse.Namespace) -> int:
+    from . import daemon
+
+    try:
+        return daemon.run_foreground(state.state_dir())
+    except daemon.Unsupported as e:
+        return _failed(args, e)
+
+
 def _failed(args: argparse.Namespace, e: Exception) -> int:
     if args.json:
         print(json.dumps({"error": str(e)}))
@@ -175,6 +184,7 @@ def _parser() -> argparse.ArgumentParser:
         cmd.set_defaults(run=run)
         return cmd
 
+    command(sub, "daemon", _daemon, "run the bridge in the foreground")
     command(sub, "version", _version, "print client and protocol versions")
     pair_cmd = command(sub, "pair", _pair, "pair with a browser: pipe in the block from /pair-agent")
     pair_cmd.add_argument("--from-stdin", action="store_true", required=True,

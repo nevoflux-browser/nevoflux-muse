@@ -6,6 +6,7 @@ One agent pairs with one head. The state directory holds:
 - `account.json`: the NevoFlux account token from the device grant, and the
   account service that issued it (revocation must go back there)
 - `auth_pending.json`: a device grant waiting for the person to approve it
+- the bridge's socket, lock, log and output (see daemon.py)
 
 All are secrets: the directory is created 0700 and the files 0600, written
 whole or not at all. Each carries a schema version; a file this client cannot
@@ -29,7 +30,9 @@ APP = "nevoflux-muse"
 PAIRING_FILE = "pairing.json"
 ACCOUNT_FILE = "account.json"
 AUTH_PENDING_FILE = "auth_pending.json"
-KNOWN_FILES = (ACCOUNT_FILE, AUTH_PENDING_FILE, PAIRING_FILE)
+BRIDGE_FILES = ("bridge.sock", "bridge.lock", "bridge.out", "bridge.log",
+                "bridge.log.1", "bridge.log.2", "bridge.log.3")
+KNOWN_FILES = (ACCOUNT_FILE, AUTH_PENDING_FILE, PAIRING_FILE, *BRIDGE_FILES)
 SCHEMA = 1
 NUMBER = (int, float)  # a field type: JSON numbers (never bool)
 
@@ -60,10 +63,14 @@ def state_dir() -> Path:
     return Path.home() / ".local" / "state" / APP
 
 
-def write_secret(d: Path, name: str, obj: dict) -> None:
+def ensure_dir(d: Path) -> None:
     if not d.exists():
         d.mkdir(parents=True)
         os.chmod(d, 0o700)  # mkdir's mode is masked by the umask
+
+
+def write_secret(d: Path, name: str, obj: dict) -> None:
+    ensure_dir(d)
     fd, tmp = tempfile.mkstemp(dir=d, prefix=f".{name}.")
     try:
         os.chmod(tmp, 0o600)

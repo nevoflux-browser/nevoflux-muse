@@ -29,7 +29,8 @@ class _Usage(Exception):
 
 def _bridge_errors() -> tuple[type[Exception], ...]:
     from . import daemon
-    return (ipc.BridgeDown, daemon.NotReady, daemon.Unsupported, daemon.AlreadyRunning)
+    return (ipc.BridgeDown, daemon.NotReady, daemon.Unsupported, daemon.AlreadyRunning,
+            state.UnsupportedState)
 
 
 def _notify(d, op: str) -> None:
@@ -188,10 +189,10 @@ def _positive(text: str) -> float:
 def _unpair(args: argparse.Namespace) -> int:
     from . import daemon
     d = state.state_dir()
-    daemon.stop(d)
     try:
-        unpaired = state.unpair(d)
-    except OSError as e:
+        with daemon.held(d):  # no bridge may serve the old pairing meanwhile
+            unpaired = state.unpair(d)
+    except (ipc.BridgeDown, OSError) as e:
         return _failed(args, e)
     if args.json:
         print(json.dumps({"unpaired": unpaired, "state_dir": str(d)}))
@@ -207,17 +208,18 @@ def _unpair(args: argparse.Namespace) -> int:
 def _reset(args: argparse.Namespace) -> int:
     from . import daemon
     d = state.state_dir()
-    daemon.stop(d)
     revoked: bool | None = None
     error = None
-    if not args.local_only:
-        try:
-            revoked = auth.revoke_and_verify(d) or None
-        except (auth.AccountError, state.UnsupportedState, OSError) as e:
-            revoked, error = False, str(e)
     try:
-        removed, left = state.reset(d, keep=(state.ACCOUNT_FILE,) if revoked is False else ())
-    except OSError as e:
+        with daemon.held(d):  # no bridge may start while the files go
+            if not args.local_only:
+                try:
+                    revoked = auth.revoke_and_verify(d) or None
+                except (auth.AccountError, state.UnsupportedState, OSError) as e:
+                    revoked, error = False, str(e)
+            keep = (state.ACCOUNT_FILE,) if revoked is False else ()
+            removed, left = state.reset(d, keep=keep)
+    except (ipc.BridgeDown, OSError) as e:
         return _failed(args, e)
     if args.json:
         out = {"revoked": revoked, "removed": removed, "left": left, "state_dir": str(d)}
@@ -364,7 +366,8 @@ def _bridge_status(d, out: dict, approved: bool) -> None:
         out["last_error"] = reply["last_error"]
 
 
-def _parser() -> argparse.ArgumentParser:
+def _parser() -> tuple[argparse.ArgumentParser, argparse.ArgumentParser]:
+    """The parser, and the `call` subparser (parsed intermixed: see main)."""
     parser = argparse.ArgumentParser(prog="nf")
     sub = parser.add_subparsers(dest="command")
 
@@ -402,12 +405,16 @@ def _parser() -> argparse.ArgumentParser:
                     "revoke the sign-in and forget everything (run before uninstalling)")
     reset.add_argument("--local-only", action="store_true",
                        help="delete local state without revoking on the server")
-    return parser
+    return parser, call
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = _parser()
-    args = parser.parse_args(argv)
+    parser, call = _parser()
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["call"]:  # `nf call t a=1 --timeout 5 b=2`: options among the pairs
+        args = call.parse_intermixed_args(argv[1:])
+    else:
+        args = parser.parse_args(argv)
     if not hasattr(args, "run"):
         parser.print_usage(sys.stderr)
         return 2

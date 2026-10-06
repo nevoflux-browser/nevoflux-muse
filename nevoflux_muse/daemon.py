@@ -9,7 +9,8 @@ with its process.
 
 A detached bridge writes its stdout and stderr to bridge.out (truncated at each
 start) and its log to bridge.log, rotated at 1 MiB. The process runs with umask
-077: everything it creates is the owner's alone.
+077: everything it creates is the owner's alone. It runs in the state directory,
+so nothing in the caller's working directory can shadow a module it imports.
 """
 
 from __future__ import annotations
@@ -79,16 +80,21 @@ def detach(d: Path) -> None:
         subprocess.Popen(
             [sys.executable, "-m", "nevoflux_muse.cli", "daemon"],
             stdin=subprocess.DEVNULL, stdout=f, stderr=f, start_new_session=True,
-            env={**os.environ, "NF_HOME": str(d)}, close_fds=True)
+            env={**os.environ, "NF_HOME": str(d)}, close_fds=True, cwd=str(d))
 
 
 def ensure(d: Path, timeout: float = START_TIMEOUT) -> bool:
-    """Make sure a bridge serves d. True if this call started it."""
+    """Make sure a bridge of this version serves d. True if this call started it.
+
+    A bridge of another version (still running after `pip install -U`) is replaced."""
     _require()
-    if alive(d):
+    running = alive(d)
+    if running and running.get("version") == __version__:
         return False
     if not ready(d):
         raise NotReady("pair (`nf pair --from-stdin`) and sign in (`nf auth begin`) first")
+    if running:
+        stop(d)
     detach(d)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -99,25 +105,73 @@ def ensure(d: Path, timeout: float = START_TIMEOUT) -> bool:
 
 
 def stop(d: Path, timeout: float = 5.0) -> bool:
-    """Ask a running bridge to exit and wait for it. False if none was running."""
+    """Ask a running bridge to exit and wait until it is gone. False if none was running.
+
+    One that has not finished within timeout gets SIGTERM, then SIGKILL; if it still
+    cannot be seen gone, BridgeDown: the caller must not delete its files."""
     if not SUPPORTED:
         return False
-    try:
-        ipc.request(d, {"op": "shutdown"}, 2.0)
-    except ipc.BridgeDown:
+    running = alive(d)
+    if running is None:
         return False
+    pid = running.get("pid")
+    with contextlib.suppress(ipc.BridgeDown):
+        ipc.request(d, {"op": "shutdown"}, 2.0)
+    if _wait_gone(d, timeout):
+        return True
+    for sig, wait in ((signal.SIGTERM, 2.0), (signal.SIGKILL, 1.0)):
+        if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
+            with contextlib.suppress(OSError):
+                os.kill(pid, sig)
+        if _wait_gone(d, wait):
+            return True
+    raise ipc.BridgeDown("the bridge did not stop")
+
+
+def _wait_gone(d: Path, timeout: float) -> bool:
     deadline = time.monotonic() + timeout
-    while _still_running(d) and time.monotonic() < deadline:
+    while _still_running(d):
+        if time.monotonic() >= deadline:
+            return False
         time.sleep(0.05)
     return True
 
 
-def _still_running(d: Path) -> bool:
-    """Answering, or not yet done tidying up: the socket file is removed and the lock
-    released only as the process finishes, and a restart straight after must not race it."""
+@contextlib.contextmanager
+def held(d: Path, timeout: float = 10.0):
+    """Stop any bridge and keep a new one from starting until the block ends.
+
+    `nf reset` and `nf unpair` run inside this: a bridge some parallel `nf ensure`
+    starts meanwhile misses the lock and exits. A no-op where there is no bridge."""
+    if not SUPPORTED or not d.is_dir():
+        yield
+        return
     import fcntl
 
-    if alive(d) or ipc.socket_path(d).exists():
+    fd = os.open(d / LOCK_FILE, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        deadline = time.monotonic() + timeout
+        while True:
+            stop(d)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:  # a bridge got it first, or is still starting
+                if time.monotonic() >= deadline:
+                    raise ipc.BridgeDown("the bridge did not stop") from None
+                time.sleep(0.1)
+        yield
+    finally:
+        os.close(fd)  # releases the lock
+
+
+def _still_running(d: Path) -> bool:
+    """Answering, or not yet done tidying up: the lock is released only as the process
+    finishes (after it removed its socket), and a restart straight after must not race it.
+    A killed bridge leaves its socket file behind but not the lock."""
+    import fcntl
+
+    if alive(d):
         return True
     try:
         fd = os.open(d / LOCK_FILE, os.O_RDWR)
@@ -179,9 +233,10 @@ async def _main(d: Path) -> int:
     try:
         await bridge.wait_stopped()
     finally:
+        await bridge.stop()  # first: calls in flight then end with connection_lost
         server.close()
-        await server.wait_closed()
-        await bridge.stop()
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(server.wait_closed(), 2)
         with contextlib.suppress(FileNotFoundError):
             if path.stat().st_ino == inode:  # still ours: a newer bridge may own the name
                 path.unlink()

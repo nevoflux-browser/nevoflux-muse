@@ -217,6 +217,7 @@ class Bridge:
 
 async def serve(bridge: Bridge, path: Path):
     async def on_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        msg = None
         try:
             msg = await ipc.read_request(reader)
             if msg is None:
@@ -224,8 +225,6 @@ async def serve(bridge: Bridge, path: Path):
             else:
                 reply = await bridge.handle(msg)
             await ipc.write_reply(writer, reply)
-            if isinstance(msg, dict) and msg.get("op") == "shutdown":
-                bridge.request_stop()
         except (ConnectionError, asyncio.IncompleteReadError):
             pass
         except Exception as e:  # noqa: BLE001 - last resort; never log the text or traceback
@@ -234,6 +233,8 @@ async def serve(bridge: Bridge, path: Path):
                 await ipc.write_reply(
                     writer, ipc.error_reply("internal", f"unexpected {type(e).__name__}"))
         finally:
+            if isinstance(msg, dict) and msg.get("op") == "shutdown":
+                bridge.request_stop()  # whether or not the reply got through
             writer.close()
             with contextlib.suppress(Exception):
                 await writer.wait_closed()

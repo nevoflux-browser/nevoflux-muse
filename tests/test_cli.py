@@ -438,7 +438,7 @@ class FakeBridge:
 
         monkeypatch.setattr(daemon, "ensure", ensure)
         monkeypatch.setattr(daemon, "stop", stop)
-        monkeypatch.setattr(daemon, "held", held, raising=False)
+        monkeypatch.setattr(daemon, "held", held)
         monkeypatch.setattr(daemon, "alive", lambda d: {"ok": True, "pid": 42})
         monkeypatch.setattr(ipc, "request", request)
 

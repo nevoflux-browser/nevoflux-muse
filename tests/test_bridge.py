@@ -198,3 +198,69 @@ async def test_serve_answers_and_shuts_down(tmp_path):
     finally:
         server.close()
         await server.wait_closed()
+
+
+class _Boom:
+    async def call_tool(self, tool, args):
+        raise RuntimeError("secret result text")
+
+
+class _StubConn:
+    state = "connected"
+    head = None
+    error = None
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return None
+
+    async def session(self, timeout):
+        return _Boom()
+
+
+async def test_unexpected_errors_are_internal_and_do_not_leak(tmp_path, caplog):
+    b = Bridge(tmp_path, connection_factory=_StubConn)
+    await b.start()
+    with caplog.at_level("INFO"):
+        reply = await b.handle({"op": "call", "tool": "browser_snapshot", "args": {}})
+    assert reply == {"ok": False, "error": {"code": "internal",
+                                            "message": "unexpected RuntimeError"}}
+    assert "-> internal" in caplog.text and "secret result text" not in caplog.text
+    assert "call 'browser_snapshot'" in caplog.text
+
+
+async def test_reload_survives_a_factory_that_raises(tmp_path):
+    calls = []
+
+    def factory():
+        calls.append(1)
+        if len(calls) > 1:
+            raise RuntimeError("secret path")
+        return _StubConn()
+
+    b = Bridge(tmp_path, connection_factory=factory)
+    await b.start()
+    assert (await b.handle({"op": "reload"}))["ok"]
+    status = await b.handle({"op": "status"})
+    assert status["state"] == "not_ready" and status["last_error"] == "unexpected RuntimeError"
+
+
+async def test_concurrent_reloads_leave_one_connection(relay, head, tmp_path):
+    made = []
+
+    def factory():
+        conn = factory_for(relay)()
+        made.append(conn)
+        return conn
+
+    b = Bridge(tmp_path, connection_factory=factory, connect_wait=5)
+    await b.start()
+    try:
+        await asyncio.gather(b.reload(), b.reload())
+        assert len(made) == 3
+        assert all(c._task.done() for c in made[:-1])
+        assert not made[-1]._task.done() and b._conn is made[-1]
+    finally:
+        await b.stop()

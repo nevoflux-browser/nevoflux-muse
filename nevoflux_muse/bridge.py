@@ -64,6 +64,7 @@ class Bridge:
         self._load_error: str | None = None
         self._since = _now()
         self._stopping = asyncio.Event()
+        self._lock = asyncio.Lock()  # start/stop/reload never interleave
 
     def _connection_from_files(self) -> HeadConnection | None:
         found = pairing.load_pairing(self.d)
@@ -77,11 +78,18 @@ class Bridge:
         return self._conn.state if self._conn is not None else "not_ready"
 
     async def start(self) -> None:
+        async with self._lock:
+            await self._start()
+
+    async def _start(self) -> None:
         try:
             conn = self._factory()
             self._load_error = None
         except (state.UnsupportedState, OSError) as e:
             conn, self._load_error = None, str(e)
+        except Exception as e:  # noqa: BLE001 - its text is not ours to repeat
+            conn, self._load_error = None, f"unexpected {type(e).__name__}"
+            log.error("loading the connection failed: %s", type(e).__name__)
         if conn is not None:
             await conn.__aenter__()
         self._conn = conn
@@ -89,13 +97,18 @@ class Bridge:
         log.info("connection %s", "started" if conn is not None else "not ready")
 
     async def stop(self) -> None:
+        async with self._lock:
+            await self._stop()
+
+    async def _stop(self) -> None:
         conn, self._conn = self._conn, None
         if conn is not None:
             await conn.__aexit__(None, None, None)
 
     async def reload(self) -> None:
-        await self.stop()
-        await self.start()
+        async with self._lock:
+            await self._stop()
+            await self._start()
 
     def request_stop(self) -> None:
         self._stopping.set()
@@ -173,6 +186,11 @@ class Bridge:
             outcome = "mcp_error"
             raise _Fail("mcp_error", e.message,
                         data={"code": e.code, "message": e.message, "data": e.data}) from None
+        except _Fail:
+            raise
+        except Exception as e:  # noqa: BLE001 - its text may hold a result: name the type only
+            outcome = "internal"
+            raise _Fail("internal", f"unexpected {type(e).__name__}") from None
         finally:
             log.info("%s -> %s in %.2fs", label, outcome, time.monotonic() - started)
 
@@ -189,9 +207,12 @@ class Bridge:
             raise _Fail("bad_request", "call needs a tool name and an args object")
         timeout = _seconds(msg, "timeout", self._call_timeout)
         s = await self._session(msg)
-        result = await self._guarded(f"call {tool}", timeout, lambda: s.call_tool(tool, args))
-        return {"ok": True,
-                "result": result.model_dump(mode="json", by_alias=True, exclude_none=True)}
+        result = await self._guarded(f"call {tool!r}", timeout, lambda: s.call_tool(tool, args))
+        try:
+            dumped = result.model_dump(mode="json", by_alias=True, exclude_none=True)
+        except Exception as e:  # noqa: BLE001 - name the type only
+            raise _Fail("internal", f"unexpected {type(e).__name__}") from None
+        return {"ok": True, "result": dumped}
 
 
 async def serve(bridge: Bridge, path: Path):
@@ -207,6 +228,11 @@ async def serve(bridge: Bridge, path: Path):
                 bridge.request_stop()
         except (ConnectionError, asyncio.IncompleteReadError):
             pass
+        except Exception as e:  # noqa: BLE001 - last resort; never log the text or traceback
+            log.error("serving a client failed: %s", type(e).__name__)
+            with contextlib.suppress(Exception):
+                await ipc.write_reply(
+                    writer, ipc.error_reply("internal", f"unexpected {type(e).__name__}"))
         finally:
             writer.close()
             with contextlib.suppress(Exception):

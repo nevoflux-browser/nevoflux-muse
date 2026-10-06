@@ -9,6 +9,8 @@ Mirrors the head (protocol §4-§5, and the stub head's tool table):
     capabilities.experimental.nevoflux.protocol; tools/list from its table;
     tools/call of a listed tool with a text result, of another whitelisted
     tool with -32602 "unavailable", of anything else with "not_allowed"
+  - test knobs: ignore_initialize / fail_initialize swallow or reject that many
+    initialize requests
 
 Known deviations from the real head (do not rely on these here):
   - no bad-frame limit (the head drops the session after 8 refused frames)
@@ -38,9 +40,11 @@ WHITELIST = (
 class FakeHead:
     def __init__(self, relay_url: str, channel: str, key: bytes, *, token: str = "test",
                  protocol: int = 1, tools: tuple[str, ...] = ("browser_snapshot", "browser_navigate"),
-                 hang: tuple[str, ...] = ("hang",), silent: bool = False):
+                 hang: tuple[str, ...] = ("hang",), silent: bool = False,
+                 ignore_initialize: int = 0, fail_initialize: int = 0):
         self.relay_url, self.channel, self.key, self.token = relay_url, channel, key, token
         self.protocol, self.tools, self.hang, self.silent = protocol, tools, hang, silent
+        self.ignore_initialize, self.fail_initialize = ignore_initialize, fail_initialize
         self.requests: list[dict] = []
         self.arrivals = 0
         self._ch: str | None = None
@@ -66,9 +70,9 @@ class FakeHead:
     async def rechallenge(self) -> None:
         await self._challenge()
 
-    async def replay_challenge(self) -> None:
-        """Send the latest challenge frame again, as a replaying relay would."""
-        await self._link.send({"k": "frame", "frame": self._challenges[-1]})
+    async def replay_challenge(self, index: int = -1) -> None:
+        """Send an earlier challenge frame again, as a replaying relay would."""
+        await self._link.send({"k": "frame", "frame": self._challenges[index]})
 
     async def send_raw(self, data: bytes | str) -> None:
         await self._link.ws.send(data)
@@ -124,6 +128,14 @@ class FakeHead:
             return  # a notification or a response
         params = m.get("params") or {}
         if method == "initialize":
+            if self.ignore_initialize > 0:
+                self.ignore_initialize -= 1
+                return
+            if self.fail_initialize > 0:
+                self.fail_initialize -= 1
+                await self._send({"jsonrpc": "2.0", "id": mid,
+                                  "error": {"code": -32603, "message": "initialize failed"}})
+                return
             result = {
                 "protocolVersion": params.get("protocolVersion", "2025-11-25"),
                 "capabilities": {"tools": {}, "experimental": {"nevoflux": {"protocol": self.protocol}}},

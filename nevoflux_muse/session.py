@@ -13,6 +13,10 @@ rather than redialing; it redials only when the socket drops or a present head
 stays silent past the challenge timeout. Errors only a person can fix (a
 revoked sign-in, the wrong account, an incompatible head) stop the loop and
 are raised by session().
+
+A head that challenges but never finishes initialize gets the challenge
+timeout, and a session that ends on its own (the head rejected initialize, the
+SDK failed) closes the link; both cases redial like a dropped socket.
 """
 
 from __future__ import annotations
@@ -81,6 +85,7 @@ class HeadConnection:
         self.state = "connecting"
         self._session: ClientSession | None = None
         self._fatal: Exception | None = None
+        self.head: dict | None = None
         self._changed = asyncio.Event()
         self._seen: set[str] = set()  # every challenge ever accepted, across connections
         self._read_w = None
@@ -96,8 +101,7 @@ class HeadConnection:
 
     async def __aexit__(self, *exc) -> None:
         self._task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await self._task
+        await asyncio.wait({self._task})  # a cancellation aimed at our caller still propagates
 
     async def session(self, timeout: float | None = None) -> ClientSession:
         """The current initialized session; waits for one, or raises what stopped the loop."""
@@ -112,9 +116,16 @@ class HeadConnection:
 
         return await asyncio.wait_for(wait(), timeout)
 
+    @property
+    def error(self) -> Exception | None:
+        """What stopped the loop, or None while it runs."""
+        return self._fatal
+
     def _set(self, state: str, session: ClientSession | None = None,
              fatal: Exception | None = None) -> None:
         self.state, self._session, self._fatal = state, session, fatal
+        if session is None:
+            self.head = None
         self._changed.set()
         self._changed = asyncio.Event()
 
@@ -170,8 +181,11 @@ class HeadConnection:
             if self._went_live:
                 delay = self._backoff_initial
             self._set("connecting")
-            await asyncio.sleep(delay * random.uniform(0.5, 1.0))
+            await self._backoff(delay)
             delay = min(delay * 2, self._backoff_max)
+
+    async def _backoff(self, delay: float) -> None:
+        await asyncio.sleep(delay * random.uniform(0.5, 1.0))
 
     async def _serve(self, link: RelayLink) -> None:
         env = Envelope(self._seen)
@@ -235,7 +249,13 @@ class HeadConnection:
                 tg.start_soon(pump)
                 try:
                     async with ClientSession(read_r, write_w, client_info=info) as s:
-                        await s.initialize()
+                        try:
+                            with anyio.fail_after(self._challenge_timeout):
+                                await s.initialize()
+                        except TimeoutError:
+                            log.info("the head did not finish initialize within %ss; redialing",
+                                     self._challenge_timeout)
+                            return
                         version = _protocol(s.server_capabilities)
                         if not (isinstance(version, int) and not isinstance(version, bool)
                                 and PROTOCOL_MIN <= version <= PROTOCOL_MAX):
@@ -245,12 +265,21 @@ class HeadConnection:
                         if self._stop is not stop:
                             return  # torn down while initialize was finishing
                         self._went_live = True
+                        server = s.server_info
+                        self.head = {"name": server.name if server else None,
+                                     "version": server.version if server else None,
+                                     "protocol": version}
                         self._set("connected", session=s)
                         await stop.wait()
                 finally:
                     tg.cancel_scope.cancel()
         except Exception as e:  # noqa: BLE001 - the head went away mid-initialize, etc.
             log.debug("MCP session ended: %r", e)
+        finally:
+            if self._stop is stop:  # ended on its own, not torn down: make _serve redial
+                log.info("the MCP session ended; redialing")
+                with contextlib.suppress(Exception):
+                    await link.close()
 
     async def _deliver(self, m: dict) -> None:
         if self._read_w is None:
@@ -276,3 +305,4 @@ class HeadConnection:
             done, _ = await asyncio.wait({task}, timeout=TEARDOWN_GRACE)
             if not done:
                 task.cancel()
+                await asyncio.wait({task})

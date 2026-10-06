@@ -6,6 +6,7 @@ from mcp import MCPError
 from mcp.shared.message import SessionMessage
 from mcp_types import CONNECTION_CLOSED, jsonrpc_message_adapter
 
+from nevoflux_muse import session as session_mod
 from nevoflux_muse.auth import AuthRevoked
 from nevoflux_muse.envelope import Envelope
 from nevoflux_muse.pairing import Pairing
@@ -274,3 +275,129 @@ async def test_other_relay_statuses_are_retried(relay, head, monkeypatch, status
     async with HeadConnection(pairing(relay), fixed_token, **FAST) as conn:
         await conn.session(timeout=5)
         assert conn.state == "connected"
+
+
+def count(head, method):
+    return sum(1 for m in head.requests if m.get("method") == method)
+
+
+async def test_initialize_timeout_redials(relay):
+    head = await FakeHead(relay.url, CHANNEL, KEY, ignore_initialize=1).start()
+    try:
+        async with HeadConnection(pairing(relay), fixed_token, **FAST) as conn:
+            s = await conn.session(timeout=5)
+            await s.send_ping()
+            assert count(head, "initialize") == 2
+    finally:
+        await head.stop()
+
+
+async def test_a_session_that_ends_on_its_own_redials(relay):
+    head = await FakeHead(relay.url, CHANNEL, KEY, fail_initialize=1).start()
+    try:
+        async with HeadConnection(pairing(relay), fixed_token, **FAST) as conn:
+            s = await conn.session(timeout=5)
+            await s.send_ping()
+            assert count(head, "initialize") == 2
+    finally:
+        await head.stop()
+
+
+async def test_head_and_error_properties(relay, head):
+    async with HeadConnection(pairing(relay), fixed_token, **FAST) as conn:
+        assert conn.head is None and conn.error is None
+        await conn.session(timeout=5)
+        assert conn.head == {"name": "nevoflux-head", "version": "0.0.0-fake", "protocol": 1}
+    async def revoked():
+        raise AuthRevoked("gone")
+    async with HeadConnection(pairing(relay), revoked, **FAST) as conn:
+        await until(lambda: conn.state == "auth_revoked")
+        assert isinstance(conn.error, AuthRevoked) and conn.head is None
+
+
+async def test_exit_lets_the_callers_cancellation_through():
+    conn = HeadConnection(Pairing("ws://127.0.0.1:9", CHANNEL, KEY), fixed_token, **FAST)
+
+    async def stubborn():
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            await asyncio.sleep(10)  # a slow teardown
+
+    conn._task = asyncio.create_task(stubborn())
+    await asyncio.sleep(0)
+    closer = asyncio.create_task(conn.__aexit__(None, None, None))
+    await asyncio.sleep(0.05)
+    closer.cancel()
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(closer, 1)
+    finally:
+        conn._task.cancel()
+        await asyncio.wait({conn._task})
+
+
+async def test_teardown_waits_for_a_cancelled_session_task(monkeypatch):
+    monkeypatch.setattr(session_mod, "TEARDOWN_GRACE", 0.05)
+    conn = HeadConnection(Pairing("ws://127.0.0.1:9", CHANNEL, KEY), fixed_token, **FAST)
+
+    async def slow_to_die():
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.2)
+
+    task = asyncio.create_task(slow_to_die())
+    await asyncio.sleep(0)
+    conn._session_task = task
+    await conn._drop_session()
+    assert task.done()
+
+
+class RecordingConnection(HeadConnection):
+    async def _backoff(self, delay):
+        self.delays.append(delay)
+        await asyncio.sleep(0.01)
+
+
+def capture_links(monkeypatch, statuses=()):
+    real = RelayLink.connect
+    todo = list(statuses)
+    links = []
+
+    async def connect(*args, **kwargs):
+        if todo:
+            raise RelayRefused(todo.pop(0))
+        link = await real(*args, **kwargs)
+        links.append(link)
+        return link
+
+    monkeypatch.setattr(RelayLink, "connect", connect)
+    return links
+
+
+async def test_backoff_resets_after_a_session_went_live(relay, head, monkeypatch):
+    links = capture_links(monkeypatch, [503, 503])
+    conn = RecordingConnection(pairing(relay), fixed_token, challenge_timeout=0.5,
+                               backoff_initial=0.05, backoff_max=10)
+    conn.delays = []
+    async with conn:
+        await conn.session(timeout=5)
+        assert conn.delays == [0.05, 0.1]
+        await links[-1].close()
+        await until(lambda: len(conn.delays) == 3)
+        assert conn.delays[2] == 0.05
+        await conn.session(timeout=5)
+
+
+async def test_a_challenge_from_an_earlier_connection_is_refused(relay, head, monkeypatch):
+    links = capture_links(monkeypatch)
+    async with HeadConnection(pairing(relay), fixed_token, **FAST) as conn:
+        await conn.session(timeout=5)
+        await links[-1].close()
+        await until(lambda: len(links) == 2 and conn.state == "connected")
+        s2 = await conn.session(timeout=5)
+        await head.replay_challenge(-2)  # the first connection's challenge
+        await s2.send_ping()
+        assert await conn.session(timeout=1) is s2
+        assert count(head, "initialize") == 2

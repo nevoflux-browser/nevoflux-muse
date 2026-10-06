@@ -139,3 +139,30 @@ async def test_the_log_is_private_and_holds_no_secrets(world):
     assert "call 'browser_snapshot' -> ok" in text
     for secret in ("tok-1", "jwt-for-tok-1", base64.b64encode(KEY).decode()):
         assert secret not in text
+
+
+async def test_cli_end_to_end(world, capsys):
+    import json
+
+    from nevoflux_muse.cli import main
+
+    async def nf(*argv):
+        code = await asyncio.to_thread(main, [*argv, "--json"])
+        return code, json.loads(capsys.readouterr().out)
+
+    deadline = time.monotonic() + 20
+    while True:
+        code, out = await nf("status")
+        if out["state"] == "connected" or time.monotonic() > deadline:
+            break
+        await asyncio.sleep(0.3)
+    assert out["state"] == "connected" and out["head"]["name"] == "nevoflux-head"
+    code, tools = await nf("tools")
+    assert code == 0 and [t["name"] for t in tools] == ["browser_snapshot", "browser_navigate"]
+    code, result = await nf("call", "browser_snapshot")
+    assert code == 0 and result["content"][0]["text"] == "fake browser_snapshot"
+    code, err = await nf("call", "bash", "command=id")
+    assert code == 1 and err["code"] == "mcp_error"
+    code, out = await nf("reset")
+    assert code == 0 and out["revoked"] is True
+    assert not ipc.socket_path(world.d).exists() and daemon.alive(world.d) is None

@@ -404,7 +404,9 @@ def test_status_with_a_bad_pending_url(home, capsys, clock):
 class FakeBridge:
     """Stands in for daemon.ensure/stop and ipc.request."""
 
-    def __init__(self, monkeypatch, replies=None, ensure_error=None):
+    def __init__(self, monkeypatch, replies=None, ensure_error=None, stop_error=None):
+        import contextlib
+
         from nevoflux_muse import daemon, ipc
         self.sent, self.stopped, self.ensured = [], 0, 0
         self.replies = replies or {}
@@ -425,10 +427,18 @@ class FakeBridge:
 
         def stop(d, timeout=5.0):
             self.stopped += 1
+            if stop_error:
+                raise stop_error
             return True
+
+        @contextlib.contextmanager
+        def held(d, timeout=10.0):
+            stop(d)
+            yield
 
         monkeypatch.setattr(daemon, "ensure", ensure)
         monkeypatch.setattr(daemon, "stop", stop)
+        monkeypatch.setattr(daemon, "held", held, raising=False)
         monkeypatch.setattr(daemon, "alive", lambda d: {"ok": True, "pid": 42})
         monkeypatch.setattr(ipc, "request", request)
 
@@ -473,6 +483,12 @@ def test_call_text_and_json(home, capsys, monkeypatch):
     assert main(["call", "browser_snapshot", "--timeout", "5", "--json"]) == 0
     assert json.loads(capsys.readouterr().out) == RESULT
     assert fake.sent[-1]["timeout"] == 5.0
+
+
+def test_call_options_mix_with_arguments(home, capsys, monkeypatch):
+    fake = FakeBridge(monkeypatch, {"call": {"ok": True, "result": RESULT}})
+    assert main(["call", "x", "a=1", "--timeout", "5", "b=2", "--json"]) == 0
+    assert fake.sent == [{"op": "call", "tool": "x", "args": {"a": 1, "b": 2}, "timeout": 5.0}]
 
 
 def test_call_tool_error_exits_1(home, capsys, monkeypatch):
@@ -587,3 +603,25 @@ def test_ensure_and_daemon_detach(home, capsys, monkeypatch):
     monkeypatch.setattr(daemon, "alive", lambda d: None)
     monkeypatch.setattr(daemon, "run_foreground", lambda d: 0)
     assert main(["daemon"]) == 0
+
+
+def test_unpair_and_reset_keep_everything_when_the_bridge_will_not_stop(home, capsys,
+                                                                       monkeypatch):
+    from nevoflux_muse import ipc
+    FakeBridge(monkeypatch, stop_error=ipc.BridgeDown("the bridge did not stop"))
+    _populate(home)
+    for argv in (["unpair"], ["reset", "--local-only"]):
+        code, out = run_json(capsys, *argv)
+        assert code == 1 and out["error"] == "the bridge did not stop"
+    assert (home / PAIRING_FILE).exists() and (home / ACCOUNT_FILE).exists()
+
+
+def test_ensure_with_an_unreadable_pairing(home, capsys, monkeypatch):
+    from nevoflux_muse import daemon
+    ready_home(home)  # its key is not 32 bytes
+    monkeypatch.setattr(daemon, "SUPPORTED", True)
+    monkeypatch.setattr(daemon, "alive", lambda d: None)
+    monkeypatch.setattr(daemon, "detach", lambda d: pytest.fail("must not start a bridge"))
+    code, out = run_json(capsys, "ensure")
+    assert code == 1
+    assert PAIRING_FILE in out["error"] and "nf reset --local-only" in out["error"]

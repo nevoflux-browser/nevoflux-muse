@@ -200,6 +200,23 @@ async def test_serve_answers_and_shuts_down(tmp_path):
         await server.wait_closed()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="AF_UNIX")
+async def test_shutdown_stops_even_when_the_reply_cannot_be_written(tmp_path, monkeypatch):
+    async def broken(writer, reply):
+        raise ConnectionResetError
+
+    b = Bridge(tmp_path, connection_factory=lambda: None)
+    server = await serve(b, ipc.socket_path(tmp_path))
+    monkeypatch.setattr(ipc, "write_reply", broken)
+    try:
+        with pytest.raises(ipc.BridgeDown):
+            await asyncio.to_thread(ipc.request, tmp_path, {"op": "shutdown"}, 5)
+        await asyncio.wait_for(b.wait_stopped(), 2)
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
 class _Boom:
     async def call_tool(self, tool, args):
         raise RuntimeError("secret result text")

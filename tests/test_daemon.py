@@ -166,3 +166,95 @@ async def test_cli_end_to_end(world, capsys):
     code, out = await nf("reset")
     assert code == 0 and out["revoked"] is True
     assert not ipc.socket_path(world.d).exists() and daemon.alive(world.d) is None
+
+
+async def until_gone(d, timeout=5):
+    deadline = time.monotonic() + timeout
+    while await asyncio.to_thread(my_bridges, d) and time.monotonic() < deadline:
+        await asyncio.sleep(0.1)
+    return await asyncio.to_thread(my_bridges, d)
+
+
+async def test_stop_while_a_call_hangs(world):
+    await asyncio.to_thread(daemon.ensure, world.d)
+    await wait_state(world.d, "connected")
+    ended = []
+
+    def hang():
+        try:
+            ended.append(ipc.request(world.d, {"op": "call", "tool": "hang", "args": {}}, 30))
+        except ipc.BridgeDown as e:
+            ended.append(e)
+
+    caller = threading.Thread(target=hang)
+    caller.start()
+    deadline = time.monotonic() + 10
+    while not any((m.get("params") or {}).get("name") == "hang" for m in world.head.requests):
+        assert time.monotonic() < deadline, "the call never reached the head"
+        await asyncio.sleep(0.05)
+    started = time.monotonic()
+    assert await asyncio.to_thread(daemon.stop, world.d) is True
+    assert time.monotonic() - started < 3.5
+    assert daemon.alive(world.d) is None
+    assert not ipc.socket_path(world.d).exists()
+    await asyncio.to_thread(caller.join, 5)
+    assert ended, "the hanging call never ended"
+    if isinstance(ended[0], dict):
+        assert ended[0]["error"]["code"] == "connection_lost"
+    assert await until_gone(world.d) == []
+
+
+async def test_sigterm_stops_the_bridge(world):
+    await asyncio.to_thread(daemon.ensure, world.d)
+    os.kill(daemon.alive(world.d)["pid"], signal.SIGTERM)
+    deadline = time.monotonic() + 3
+    while ipc.socket_path(world.d).exists() and time.monotonic() < deadline:
+        await asyncio.sleep(0.05)
+    assert not ipc.socket_path(world.d).exists()
+    assert daemon.alive(world.d) is None
+    assert await until_gone(world.d) == []
+
+
+async def test_held_keeps_any_bridge_from_starting(world):
+    await asyncio.to_thread(daemon.ensure, world.d)
+
+    def inside():
+        with daemon.held(world.d):
+            assert daemon.alive(world.d) is None
+            with pytest.raises(ipc.BridgeDown):
+                daemon.ensure(world.d, timeout=1)
+            deadline = time.monotonic() + 5  # the one ensure started exits on the lock
+            while my_bridges(world.d) and time.monotonic() < deadline:
+                time.sleep(0.1)
+            assert my_bridges(world.d) == []
+
+    await asyncio.to_thread(inside)
+    assert await asyncio.to_thread(daemon.ensure, world.d) is True
+
+
+async def test_reset_with_a_running_bridge_leaves_none(world, capsys):
+    from nevoflux_muse.cli import main
+
+    await asyncio.to_thread(daemon.ensure, world.d)
+    assert await asyncio.to_thread(main, ["reset", "--local-only", "--json"]) == 0
+    capsys.readouterr()
+    assert not ipc.socket_path(world.d).exists() and daemon.alive(world.d) is None
+    assert await until_gone(world.d) == []
+
+
+async def test_the_bridge_ignores_the_callers_directory(world, tmp_path, monkeypatch):
+    agent = tmp_path / "agent"
+    agent.mkdir()
+    for name in ("random", "secrets"):
+        (agent / f"{name}.py").write_text("raise ImportError('shadowed')\n")
+    monkeypatch.chdir(agent)
+    assert await asyncio.to_thread(daemon.ensure, world.d) is True
+    await wait_state(world.d, "connected")
+
+
+async def test_ensure_replaces_a_bridge_of_another_version(world, monkeypatch):
+    await asyncio.to_thread(daemon.ensure, world.d)
+    pid = daemon.alive(world.d)["pid"]
+    monkeypatch.setattr(daemon, "__version__", "99.0.0")  # as after `pip install -U`
+    assert await asyncio.to_thread(daemon.ensure, world.d) is True
+    assert daemon.alive(world.d)["pid"] != pid

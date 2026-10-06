@@ -1,3 +1,4 @@
+import base64
 import io
 import json
 from pathlib import Path
@@ -26,6 +27,12 @@ def test_version_for_agents(capsys):
 def test_no_subcommand_is_a_usage_error(capsys):
     assert main([]) == 2
     assert "usage" in capsys.readouterr().err.lower()
+
+
+@pytest.fixture(autouse=True)
+def no_bridge(monkeypatch):
+    from nevoflux_muse import daemon
+    monkeypatch.setattr(daemon, "SUPPORTED", False)
 
 
 @pytest.fixture
@@ -196,7 +203,8 @@ def test_status_flow(home, account, capsys, clock, monkeypatch):
     assert run_json(capsys, "status")[1] == {"state": "not_paired", "paired": False, "auth": "ok"}
     monkeypatch.setattr("sys.stdin", io.StringIO(PAIR_BLOCK))
     run_json(capsys, "pair", "--from-stdin")
-    assert run_json(capsys, "status")[1] == {"state": "ready", "paired": True, "auth": "ok"}
+    assert run_json(capsys, "status")[1] == {"state": "ready", "paired": True, "auth": "ok",
+                                             "bridge": "unsupported on Windows"}
     everything = json.dumps(account.requests)
     assert "Cookie" not in everything
 
@@ -391,3 +399,191 @@ def test_status_with_a_bad_pending_url(home, capsys, clock):
         "next_poll_at": T0})
     code, out = run_json(capsys, "status")
     assert code == 1 and st.AUTH_PENDING_FILE in out["error"]
+
+
+class FakeBridge:
+    """Stands in for daemon.ensure/stop and ipc.request."""
+
+    def __init__(self, monkeypatch, replies=None, ensure_error=None):
+        from nevoflux_muse import daemon, ipc
+        self.sent, self.stopped, self.ensured = [], 0, 0
+        self.replies = replies or {}
+        monkeypatch.setattr(daemon, "SUPPORTED", True)
+
+        def ensure(d):
+            self.ensured += 1
+            if ensure_error:
+                raise ensure_error
+            return False
+
+        def request(d, msg, timeout):
+            self.sent.append(msg)
+            reply = self.replies.get(msg["op"], {"ok": True})
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+
+        def stop(d, timeout=5.0):
+            self.stopped += 1
+            return True
+
+        monkeypatch.setattr(daemon, "ensure", ensure)
+        monkeypatch.setattr(daemon, "stop", stop)
+        monkeypatch.setattr(daemon, "alive", lambda d: {"ok": True, "pid": 42})
+        monkeypatch.setattr(ipc, "request", request)
+
+
+PNG = base64.b64encode(b"\x89PNG" + bytes(96)).decode()
+RESULT = {"content": [{"type": "text", "text": "hello"},
+                      {"type": "image", "data": PNG, "mimeType": "image/png"}],
+          "isError": False}
+
+
+def test_call_args():
+    from nevoflux_muse.cli import _call_args
+    assert _call_args(["url=https://a.b/c?x=1", "n=3", "on=true", "s=\"3\"", "o={\"a\":1}"],
+                      False) == {"url": "https://a.b/c?x=1", "n": 3, "on": True, "s": "3",
+                                 "o": {"a": 1}}
+
+
+@pytest.mark.parametrize("pairs", [["noequals"], ["=v"], ["k=1", "k=2"]])
+def test_call_args_usage_errors(pairs):
+    from nevoflux_muse.cli import _call_args, _Usage
+    with pytest.raises(_Usage):
+        _call_args(pairs, False)
+
+
+def test_call_args_from_stdin(monkeypatch):
+    from nevoflux_muse.cli import _call_args, _Usage
+    monkeypatch.setattr("sys.stdin", io.StringIO('{"url": "https://x"}'))
+    assert _call_args([], True) == {"url": "https://x"}
+    with pytest.raises(_Usage):
+        _call_args(["a=1"], True)
+    monkeypatch.setattr("sys.stdin", io.StringIO("[1]"))
+    with pytest.raises(_Usage):
+        _call_args([], True)
+
+
+def test_call_text_and_json(home, capsys, monkeypatch):
+    fake = FakeBridge(monkeypatch, {"call": {"ok": True, "result": RESULT}})
+    assert main(["call", "browser_snapshot", "depth=2"]) == 0
+    assert capsys.readouterr().out.splitlines() == ["hello", "[image image/png, 100 bytes]"]
+    assert fake.sent == [{"op": "call", "tool": "browser_snapshot", "args": {"depth": 2},
+                          "timeout": 120.0}]
+    assert main(["call", "browser_snapshot", "--timeout", "5", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == RESULT
+    assert fake.sent[-1]["timeout"] == 5.0
+
+
+def test_call_tool_error_exits_1(home, capsys, monkeypatch):
+    FakeBridge(monkeypatch, {"call": {"ok": True, "result": {**RESULT, "isError": True}}})
+    assert main(["call", "x"]) == 1
+
+
+def test_call_bridge_error(home, capsys, monkeypatch):
+    FakeBridge(monkeypatch, {"call": {"ok": False, "error": {
+        "code": "mcp_error", "message": "bash: not_allowed", "data": {"code": -32602}}}})
+    assert main(["call", "bash", "--json"]) == 1
+    assert json.loads(capsys.readouterr().out) == {
+        "error": "bash: not_allowed", "code": "mcp_error", "data": {"code": -32602}}
+    assert main(["call", "bash"]) == 1
+    assert "bash: not_allowed" in capsys.readouterr().err
+
+
+def test_call_usage_error_exits_2(home, capsys, monkeypatch):
+    FakeBridge(monkeypatch)
+    assert main(["call", "x", "broken"]) == 2
+
+
+def test_call_when_the_bridge_cannot_start(home, capsys, monkeypatch):
+    from nevoflux_muse import ipc
+    FakeBridge(monkeypatch, ensure_error=ipc.BridgeDown("the bridge did not start"))
+    assert main(["call", "x", "--json"]) == 1
+    assert json.loads(capsys.readouterr().out)["error"] == "the bridge did not start"
+
+
+def test_tools(home, capsys, monkeypatch):
+    tools = [{"name": "browser_snapshot", "description": "Snapshot.\nMore.", "inputSchema": {}},
+             {"name": "browser_navigate", "description": None, "inputSchema": {}}]
+    FakeBridge(monkeypatch, {"tools": {"ok": True, "tools": tools}})
+    assert main(["tools"]) == 0
+    assert capsys.readouterr().out.splitlines() == ["browser_snapshot — Snapshot.",
+                                                    "browser_navigate"]
+    assert main(["tools", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == tools
+
+
+@pytest.mark.parametrize("argv", [["daemon"], ["ensure"], ["tools"], ["call", "x"]])
+def test_bridge_commands_on_windows(home, capsys, argv):
+    assert main([*argv, "--json"]) == 1
+    assert "unsupported on Windows" in json.loads(capsys.readouterr().out)["error"]
+
+
+def ready_home(home):
+    st.write_secret(home, PAIRING_FILE, {"relay": "wss://r", "channel": "c", "key": "AA=="})
+    st.write_secret(home, ACCOUNT_FILE, {"base_url": "http://127.0.0.1:9", "access_token": "t"})
+
+
+def test_status_asks_the_bridge(home, capsys, monkeypatch):
+    ready_home(home)
+    FakeBridge(monkeypatch, {"status": {
+        "ok": True, "state": "connected", "since": "2026-10-06T00:00:00+00:00", "pid": 42,
+        "head": {"name": "nevoflux-head", "version": "0.3.15", "protocol": 1},
+        "last_error": None}})
+    code, out = run_json(capsys, "status")
+    assert code == 0
+    assert out == {"state": "connected", "paired": True, "auth": "ok",
+                   "bridge": {"pid": 42, "since": "2026-10-06T00:00:00+00:00"},
+                   "head": {"name": "nevoflux-head", "version": "0.3.15", "protocol": 1}}
+
+
+def test_status_when_the_bridge_cannot_start(home, capsys, monkeypatch):
+    from nevoflux_muse import ipc
+    ready_home(home)
+    FakeBridge(monkeypatch, ensure_error=ipc.BridgeDown("the bridge did not start"))
+    code, out = run_json(capsys, "status")
+    assert code == 0 and out["state"] == "bridge_down"
+    assert out["bridge_error"] == "the bridge did not start"
+
+
+def test_status_text_for_bridge_states(home, capsys, monkeypatch):
+    ready_home(home)
+    FakeBridge(monkeypatch, {"status": {"ok": True, "state": "head_offline", "since": "s",
+                                        "pid": 1, "head": None, "last_error": None}})
+    assert main(["status"]) == 0
+    assert "not online" in capsys.readouterr().out
+
+
+def test_pair_and_approval_reload_the_bridge(home, account, capsys, clock, monkeypatch):
+    fake = FakeBridge(monkeypatch, {"status": {"ok": True, "state": "connecting", "since": "s",
+                                               "pid": 1, "head": None, "last_error": None}})
+    monkeypatch.setattr("sys.stdin", io.StringIO(PAIR_BLOCK))
+    run_json(capsys, "pair", "--from-stdin")
+    assert fake.sent == [{"op": "reload"}]
+    run_json(capsys, "auth", "begin")
+    account.polls = ["approve"]
+    clock["now"] = T0 + 5
+    _, out = run_json(capsys, "status")
+    assert out["state"] == "connecting"
+    assert [m["op"] for m in fake.sent] == ["reload", "reload", "status"]
+
+
+def test_unpair_and_reset_stop_the_bridge(home, capsys, monkeypatch):
+    fake = FakeBridge(monkeypatch)
+    _populate(home)
+    main(["unpair", "--json"])
+    main(["reset", "--local-only", "--json"])
+    capsys.readouterr()
+    assert fake.stopped == 2
+
+
+def test_ensure_and_daemon_detach(home, capsys, monkeypatch):
+    from nevoflux_muse import daemon
+    FakeBridge(monkeypatch)
+    assert run_json(capsys, "ensure") == (0, {"running": True, "started": False})
+    # daemon refuses when one is already running
+    code, out = run_json(capsys, "daemon", "--detach")
+    assert code == 1 and "already running" in out["error"]
+    monkeypatch.setattr(daemon, "alive", lambda d: None)
+    monkeypatch.setattr(daemon, "run_foreground", lambda d: 0)
+    assert main(["daemon"]) == 0

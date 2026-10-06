@@ -7,10 +7,11 @@ it is usually an agent, not a person at a terminal.
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import sys
 
-from . import PROTOCOL_MAX, PROTOCOL_MIN, __version__, auth, pairing, state
+from . import PROTOCOL_MAX, PROTOCOL_MIN, __version__, auth, ipc, pairing, state
 
 
 def _version(args: argparse.Namespace) -> int:
@@ -22,13 +23,76 @@ def _version(args: argparse.Namespace) -> int:
     return 0
 
 
-def _daemon(args: argparse.Namespace) -> int:
-    from . import daemon
+class _Usage(Exception):
+    pass
 
-    try:
-        return daemon.run_foreground(state.state_dir())
-    except daemon.Unsupported as e:
-        return _failed(args, e)
+
+def _bridge_errors() -> tuple[type[Exception], ...]:
+    from . import daemon
+    return (ipc.BridgeDown, daemon.NotReady, daemon.Unsupported, daemon.AlreadyRunning)
+
+
+def _notify(d, op: str) -> None:
+    """Tell a running bridge to `op`; nothing to do when none runs."""
+    from . import daemon
+    if daemon.SUPPORTED:
+        try:
+            ipc.request(d, {"op": op}, 5.0)
+        except ipc.BridgeDown:
+            pass
+
+
+def _ask(d, msg: dict, timeout: float) -> dict:
+    from . import daemon
+    daemon.ensure(d)
+    return ipc.request(d, msg, timeout)
+
+
+def _reply_failed(args: argparse.Namespace, reply: dict) -> int:
+    err = dict(reply.get("error") or {})
+    message = err.pop("message", "the bridge refused the request")
+    if args.json:
+        print(json.dumps({"error": message, **err}))
+    else:
+        print(f"nf: {message}", file=sys.stderr)
+    return 1
+
+
+def _call_args(pairs: list[str], from_stdin: bool) -> dict:
+    if from_stdin:
+        if pairs:
+            raise _Usage("key=value arguments cannot be combined with --args-stdin")
+        try:
+            obj = json.loads(sys.stdin.read())
+        except ValueError:
+            raise _Usage("--args-stdin needs a JSON object on stdin") from None
+        if not isinstance(obj, dict):
+            raise _Usage("--args-stdin needs a JSON object on stdin")
+        return obj
+    out: dict = {}
+    for i, pair in enumerate(pairs, 1):
+        key, sep, value = pair.partition("=")
+        if not sep or not key:
+            raise _Usage(f"argument {i} is not key=value")  # never echo it: it may be secret
+        if key in out:
+            raise _Usage(f"{key} is given twice")
+        try:
+            out[key] = json.loads(value)
+        except ValueError:
+            out[key] = value
+    return out
+
+
+def _print_content(result: dict) -> None:
+    for block in result.get("content") or []:
+        kind = block.get("type")
+        if kind == "text":
+            print(block.get("text", ""))
+        elif kind == "image":
+            size = len(base64.b64decode(block.get("data") or ""))
+            print(f"[image {block.get('mimeType', '?')}, {size} bytes]")
+        else:
+            print(f"[{kind}]")
 
 
 def _failed(args: argparse.Namespace, e: Exception) -> int:
@@ -39,8 +103,92 @@ def _failed(args: argparse.Namespace, e: Exception) -> int:
     return 1
 
 
-def _unpair(args: argparse.Namespace) -> int:
+def _tools(args: argparse.Namespace) -> int:
     d = state.state_dir()
+    try:
+        reply = _ask(d, {"op": "tools"}, ipc.CONNECT_WAIT + ipc.CALL_TIMEOUT + 5)
+    except _bridge_errors() as e:
+        return _failed(args, e)
+    if not reply.get("ok"):
+        return _reply_failed(args, reply)
+    if args.json:
+        print(json.dumps(reply["tools"]))
+    else:
+        for tool in reply["tools"]:
+            lines = (tool.get("description") or "").strip().splitlines()
+            print(f"{tool['name']} — {lines[0]}" if lines else tool["name"])
+    return 0
+
+
+def _call(args: argparse.Namespace) -> int:
+    d = state.state_dir()
+    try:
+        tool_args = _call_args(args.pairs, args.args_stdin)
+    except _Usage as e:
+        print(f"nf call: {e}", file=sys.stderr)
+        return 2
+    msg = {"op": "call", "tool": args.tool, "args": tool_args, "timeout": args.timeout}
+    try:
+        reply = _ask(d, msg, ipc.CONNECT_WAIT + args.timeout + 5)
+    except _bridge_errors() as e:
+        return _failed(args, e)
+    if not reply.get("ok"):
+        return _reply_failed(args, reply)
+    result = reply["result"]
+    if args.json:
+        print(json.dumps(result))
+    else:
+        _print_content(result)
+    return 1 if result.get("isError") else 0
+
+
+def _ensure(args: argparse.Namespace) -> int:
+    from . import daemon
+    d = state.state_dir()
+    try:
+        started = daemon.ensure(d)
+    except _bridge_errors() as e:
+        return _failed(args, e)
+    if args.json:
+        print(json.dumps({"running": True, "started": started}))
+    else:
+        print("Bridge started." if started else "Bridge already running.")
+    return 0
+
+
+def _daemon(args: argparse.Namespace) -> int:
+    from . import daemon
+    d = state.state_dir()
+    try:
+        if not daemon.SUPPORTED:
+            raise daemon.Unsupported()
+        if daemon.alive(d):
+            raise daemon.AlreadyRunning("a bridge is already running for this state directory")
+        if not args.detach:
+            return daemon.run_foreground(d)
+        daemon.ensure(d)
+        pid = (daemon.alive(d) or {}).get("pid")
+    except _bridge_errors() as e:
+        return _failed(args, e)
+    print(json.dumps({"running": True, "pid": pid}) if args.json
+          else f"Bridge running (pid {pid}).")
+    return 0
+
+
+def _positive(text: str) -> float:
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError("a number of seconds") from None
+    if value <= 0:
+        raise argparse.ArgumentTypeError("a positive number of seconds")
+    return value
+
+
+def _unpair(args: argparse.Namespace) -> int:
+    from . import daemon
+    d = state.state_dir()
+    daemon.stop(d)
     try:
         unpaired = state.unpair(d)
     except OSError as e:
@@ -57,7 +205,9 @@ def _unpair(args: argparse.Namespace) -> int:
 
 
 def _reset(args: argparse.Namespace) -> int:
+    from . import daemon
     d = state.state_dir()
+    daemon.stop(d)
     revoked: bool | None = None
     error = None
     if not args.local_only:
@@ -92,6 +242,7 @@ def _pair(args: argparse.Namespace) -> int:
         block = pairing.pair(sys.stdin.read(), d)
     except (ValueError, OSError) as e:
         return _failed(args, e)
+    _notify(d, "reload")
     if args.json:
         print(json.dumps({"paired": True, "relay": block.relay,
                           "channel": block.channel}))
@@ -110,6 +261,7 @@ def _auth_begin(args: argparse.Namespace) -> int:
                 return 0
             auth.revoke_and_verify(d)
             (d / state.ACCOUNT_FILE).unlink(missing_ok=True)
+            _notify(d, "reload")
         dc = auth.begin(d, auth.AccountClient(auth.account_url()))
     except (auth.AccountError, state.UnsupportedState, OSError) as e:
         return _failed(args, e)
@@ -151,12 +303,14 @@ def _status(args: argparse.Namespace) -> int:
         out["state"] = "not_authorized"
     else:
         out["state"] = "ready"
+    if out["state"] == "ready":
+        _bridge_status(d, out, approved=outcome is not None and outcome.status == "approved")
     if outcome is not None and outcome.error:
         out["last_error"] = outcome.error
     if args.json:
         print(json.dumps({"state": out.pop("state"), **out}))
     else:
-        text = _STATUS_TEXT[out["state"]].format(**out)
+        text = _STATUS_TEXT.get(out["state"], "State: {state}").format(**out)
         if "last_error" in out:
             text += f" (last attempt: {out['last_error']})"
         if "poll_error" in out:
@@ -171,7 +325,43 @@ _STATUS_TEXT = {
     "not_paired": "Not paired: pipe the /pair-agent block into `nf pair --from-stdin`.",
     "not_authorized": "Not signed in: run `nf auth begin`.",
     "ready": "Paired and signed in.",
+    "connecting": "Connecting to the browser...",
+    "head_offline": "The browser is not online (NevoFlux is closed, or this agent was removed "
+                    "there).",
+    "connected": "Connected to the browser.",
+    "incompatible": "The browser speaks another agent protocol: upgrade nevoflux-muse.",
+    "auth_revoked": "The sign-in is no longer valid: run `nf auth begin --reset`.",
+    "account_mismatch": "Signed in with another NevoFlux account than the browser: run "
+                        "`nf auth begin --reset`.",
+    "relay_refused": "The relay refused the channel: pair again.",
+    "error": "The bridge hit an unexpected error; see bridge.log.",
+    "not_ready": "The bridge has no pairing or sign-in.",
+    "bridge_down": "The bridge is not running: {bridge_error}",
 }
+
+
+def _bridge_status(d, out: dict, approved: bool) -> None:
+    from . import daemon
+    if not daemon.SUPPORTED:
+        out["bridge"] = "unsupported on Windows"
+        return
+    try:
+        if approved:
+            _notify(d, "reload")  # a running bridge may still hold the old sign-in
+        daemon.ensure(d)
+        reply = ipc.request(d, {"op": "status"}, 5.0)
+    except _bridge_errors() as e:
+        out["state"], out["bridge_error"] = "bridge_down", str(e)
+        return
+    if not reply.get("ok"):
+        out["state"], out["bridge_error"] = "bridge_down", "the bridge refused the status request"
+        return
+    out["state"] = reply.get("state", "error")
+    out["bridge"] = {"pid": reply.get("pid"), "since": reply.get("since")}
+    if reply.get("head"):
+        out["head"] = reply["head"]
+    if reply.get("last_error"):
+        out["last_error"] = reply["last_error"]
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -184,7 +374,19 @@ def _parser() -> argparse.ArgumentParser:
         cmd.set_defaults(run=run)
         return cmd
 
-    command(sub, "daemon", _daemon, "run the bridge in the foreground")
+    daemon_cmd = command(sub, "daemon", _daemon, "run the bridge (Linux/macOS)")
+    daemon_cmd.add_argument("--detach", action="store_true",
+                            help="start it in the background and return")
+    command(sub, "ensure", _ensure, "start the bridge unless it already runs")
+    command(sub, "tools", _tools, "list the browser tools the head offers")
+    call = command(sub, "call", _call, "call a browser tool")
+    call.add_argument("tool")
+    call.add_argument("pairs", nargs="*", metavar="key=value",
+                      help="arguments; values that parse as JSON are JSON, others strings")
+    call.add_argument("--args-stdin", action="store_true",
+                      help="read the arguments as one JSON object from stdin")
+    call.add_argument("--timeout", type=_positive, default=ipc.CALL_TIMEOUT,
+                      help="seconds to wait for the result (default 120)")
     command(sub, "version", _version, "print client and protocol versions")
     pair_cmd = command(sub, "pair", _pair, "pair with a browser: pipe in the block from /pair-agent")
     pair_cmd.add_argument("--from-stdin", action="store_true", required=True,

@@ -62,3 +62,17 @@ jobs:
         run: |
           docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.21.2 \
             git /repo --config /repo/.gitleaks.toml --no-banner --redact
+
+  install:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: shellcheck
+        run: shellcheck -x setup.sh ensure.sh uninstall.sh install/lib.sh install/uv.lock.sh
+      - name: install, heal, uv fallback
+        run: bash scripts/ci_install.sh

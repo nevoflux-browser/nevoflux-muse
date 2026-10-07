@@ -237,7 +237,8 @@ def _unpair(args: argparse.Namespace) -> int:
 def _reset(args: argparse.Namespace) -> int:
     from . import daemon
     d = state.state_dir()
-    revoked: bool | None = None
+    revoked = False
+    failed = False
     error = None
     try:
         with daemon.held(d):  # no bridge may start while the files go
@@ -245,8 +246,8 @@ def _reset(args: argparse.Namespace) -> int:
                 try:
                     revoked = auth.revoke_and_verify(d) or None
                 except (auth.AccountError, state.UnsupportedState, OSError) as e:
-                    revoked, error = False, str(e)
-            keep = (state.ACCOUNT_FILE,) if revoked is False else ()
+                    failed, error = True, str(e)
+            keep = (state.ACCOUNT_FILE,) if failed else ()
             removed, left = state.reset(d, keep=keep)
     except (ipc.BridgeDown, OSError) as e:
         return _failed(args, e)
@@ -409,8 +410,11 @@ def _install_root() -> Path | None:
     installed_tag. None when nf was installed some other way."""
     env = os.environ.get("NF_INSTALL_ROOT")
     if env:
-        return Path(env)
-    root = Path(sys.prefix).parent
+        root = Path(env)
+    elif sys.prefix != sys.base_prefix:
+        root = Path(sys.prefix).parent
+    else:
+        return None
     return root if (root / "installed_tag").exists() else None
 
 
@@ -426,7 +430,8 @@ def _uninstall(args: argparse.Namespace) -> int:
 
     def finish(ok: bool) -> int:
         if args.json:
-            print(json.dumps({"ok": ok, "steps": steps, "next_steps": _NEXT_STEPS}))
+            print(json.dumps({"ok": ok, "steps": steps,
+                              "next_steps": _NEXT_STEPS if ok else []}))
         else:
             for s in steps:
                 mark = "ok" if s["ok"] else "FAILED"
@@ -452,7 +457,7 @@ def _uninstall(args: argparse.Namespace) -> int:
     except (ipc.BridgeDown, OSError) as e:
         steps.append({"step": "stop", "ok": False, "error": str(e)})
         return finish(False)
-    if revoked is False:
+    if failed:
         steps.append({"step": "revoke", "ok": False, "error": error})
         return finish(False)
     steps.append({"step": "revoke", "ok": True, "revoked": bool(revoked)})
@@ -460,7 +465,7 @@ def _uninstall(args: argparse.Namespace) -> int:
     root = _install_root()
     if root is None:
         steps.append({"step": "install_root", "ok": True,
-                      "skipped": "nf was not installed by setup.sh"})
+                      "skipped": "no setup.sh install found (no installed_tag)"})
     else:
         try:
             shutil.rmtree(root)

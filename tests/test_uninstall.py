@@ -50,6 +50,28 @@ def test_uninstall_stops_when_revoke_fails(box, capsys):
     assert out["steps"][-1]["step"] == "revoke" and out["steps"][-1]["ok"] is False
     assert box.root.exists()  # the install stays so the token can be revoked later
     assert (box.d / state.ACCOUNT_FILE).exists()
+    assert out["next_steps"] == []
+
+
+def test_uninstall_without_an_account(box, capsys):
+    (box.d / state.ACCOUNT_FILE).unlink()
+    code, out = run(capsys)
+    assert code == 0
+    assert next(s for s in out["steps"] if s["step"] == "revoke") == {
+        "step": "revoke", "ok": True, "revoked": False}
+    assert not box.root.exists()
+
+
+def test_uninstall_spares_a_root_without_installed_tag(box, capsys, tmp_path, monkeypatch):
+    stray = tmp_path / "stray"
+    stray.mkdir()
+    (stray / "keep.txt").write_text("x")
+    monkeypatch.setenv("NF_INSTALL_ROOT", str(stray))
+    code, out = run(capsys)
+    assert code == 0
+    step = next(s for s in out["steps"] if s["step"] == "install_root")
+    assert "installed_tag" in step["skipped"]
+    assert (stray / "keep.txt").exists()
 
 
 def test_uninstall_without_setup_sh(box, capsys, monkeypatch):

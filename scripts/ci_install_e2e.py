@@ -25,8 +25,8 @@ CODE = "X-ABCD-EFGH-JKMN"
 
 
 def nf(*argv: str, stdin: str | None = None) -> tuple[int, dict]:
-    proc = subprocess.run([NF, *argv, "--json"], input=stdin, capture_output=True, text=True, check=False,
-                          timeout=180)
+    proc = subprocess.run([NF, *argv, "--json"], input=stdin, capture_output=True, text=True,
+                          check=False, timeout=180)
     try:
         out = json.loads(proc.stdout) if proc.stdout.strip() else {}
     except ValueError:
@@ -39,7 +39,8 @@ def cleanup() -> None:
     try:
         d = state.state_dir()
         if ipc.socket_path(d).exists() and os.path.lexists(NF):
-            subprocess.run([NF, "uninstall", "--json"], capture_output=True, timeout=120, check=False)
+            subprocess.run([NF, "uninstall", "--json"], capture_output=True, timeout=120,
+                           check=False)
         if ipc.socket_path(d).exists() and os.path.lexists(NF):
             subprocess.run([NF, "reset", "--local-only", "--json"], capture_output=True,
                            timeout=120, check=False)

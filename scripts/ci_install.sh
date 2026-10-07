@@ -60,13 +60,13 @@ echo "== a held lock makes ensure.sh back off, and a dead holder's lock is clear
 sh -c 'NF_SRC=$1; . "$1/install/lib.sh"; nf_lock && sleep 8' holder "$here" &
 holder=$!
 for _ in $(seq 50); do [ -s "$root/.lock/pid" ] && break; sleep 0.1; done
-test "$(cat "$root/.lock/pid")" = "$holder"
+test "$(cut -d " " -f 1 < "$root/.lock/pid")" = "$holder"
 before=$(wc -l < "$root/install.log")
 ln -sf /nonexistent/python3 "$root/venv/bin/python"
 sh "$root/ensure.sh"
 test "$(wc -l < "$root/install.log")" = "$((before + 1))"
 tail -n 1 "$root/install.log" | grep -q "holds the lock (pid $holder); skipping"
-test "$(cat "$root/.lock/pid")" = "$holder"
+test "$(cut -d " " -f 1 < "$root/.lock/pid")" = "$holder"
 if "$root/venv/bin/python" -c 'import nevoflux_muse' 2>/dev/null; then
     echo "ensure.sh touched the venv while the lock was held"; exit 1
 fi

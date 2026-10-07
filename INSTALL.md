@@ -123,8 +123,11 @@ printf '%s\n' '<the whole pairing block>' | ~/.local/bin/nf pair --from-stdin --
 
 Expected: exit 0 and `{"paired": true, "relay": "...", "channel": "..."}`.
 
-If it fails: exit 1 and `{"error": "..."}`. The block was incomplete, expired or malformed
-(the code is single-use and short-lived).
+If it fails: exit 1 and `{"error": "..."}`. `nf pair` only parses the block and derives the
+key locally, so it fails only when the block is incomplete or malformed. It does not check
+whether the code is expired or already used: a stale or used code is accepted here and shows
+up later as `head_offline` or `relay_refused` in step 6. In that case also ask the person for
+a fresh block from `/pair-agent` and repeat this step.
 
 Tell the person (on failure): "That pairing block did not work (<the error>). Please run
 `/pair-agent` again and send me the new block."
@@ -153,7 +156,11 @@ Other outcomes:
 - `{"already_authorized": true}`: already signed in. Go to step 6.
 - exit 1 and `{"error": "..."}`: the account service could not be reached or the state file
   is unreadable. Wait a minute and retry. If the error says the file is unreadable or from a
-  newer version, run `nf reset --local-only` and start again from step 4.
+  newer version, first upgrade (see "Upgrade") and retry. Only if that does not help, run
+  `nf reset --local-only`, and only after telling the person and getting their agreement.
+  Tell the person: "A stored file of the NevoFlux connection is unreadable. To start over I
+  must delete it locally; the old sign-in may then stay valid on the NevoFlux server until it
+  expires. Do you agree?" Then start again from step 4.
 
 ## 6. Wait for the connection
 
@@ -169,17 +176,20 @@ Run this every 5 seconds until `state` is `connected`:
 `last_error`, `poll_error`, `bridge` (`{"pid", "since"}`), `bridge_error`, `head`.
 
 - `awaiting_device_approval`: the person has not approved yet. Keep polling. If more than
-  `expires_in` seconds pass, the sign-in expires and `state` becomes `not_authorized` with
-  `last_error` set (for example `expired_token`): repeat step 5 and give the person the new
-  link.
+  `expires_in` seconds pass, the sign-in expires and `state` becomes `not_authorized`.
+  `last_error` (for example `expired_token`) appears only in the one `nf status` call that
+  finds the failure; later calls show plain `not_authorized`. On any `not_authorized`, repeat
+  step 5 and give the person the new link (mention `last_error` if you saw it).
 - `ready`, `connecting`: keep polling.
 - `connected`: done.
 - Anything else: look the state up in the table below.
 
 Tell the person (when `connected`): "Connected. I can now use your NevoFlux browser."
 
-Give up and report if the state has not reached `connected` after about 5 minutes without a
-state the table explains.
+If the state stays `head_offline` or `connecting` for more than 5 minutes, stop polling and
+tell the person. Tell the person: "I cannot reach your NevoFlux browser. Is NevoFlux open, and
+is this agent still listed there? If not, please run `/pair-agent` and send me a fresh
+block." Other states follow the table.
 
 ## 7. Self-check
 
@@ -211,7 +221,7 @@ in the output.
 | --- | --- | --- |
 | `awaiting_device_approval` | A sign-in is waiting for the person to approve it. | Give the person the `verification_uri_complete` and `user_code` from the output again; keep polling. After `expires_in` it lapses (see step 6). |
 | `not_paired` | No browser is paired. | Do step 4. |
-| `not_authorized` | Paired, but not signed in (or the last sign-in expired or was denied; see `last_error`). | Do step 5. |
+| `not_authorized` | Paired, but not signed in (or the last sign-in expired or was denied; `last_error` shows it only in the call that found it). | Do step 5. |
 | `ready` | Paired and signed in; the bridge has not reported yet. | Poll again in a few seconds. |
 | `connecting` | The bridge is dialing the browser. | Poll again. If it lasts more than a few minutes, see `head_offline`. |
 | `head_offline` | The browser is not reachable: NevoFlux is closed, or the agent was removed there. | Tell the person: "NevoFlux does not seem to be open, or this agent was removed in it. Please open NevoFlux; if the agent is gone from its list, send me a new `/pair-agent` block." Keep polling; it reconnects by itself when the browser returns. |
@@ -220,9 +230,9 @@ in the output.
 | `auth_revoked` | The account sign-in is no longer valid. | Run `nf auth begin --reset --json` and do step 5 again. |
 | `account_mismatch` | Signed in with a different NevoFlux account than the browser's. | Run `nf auth begin --reset --json`, and tell the person: "Please approve with the same NevoFlux account that the browser is signed in to." |
 | `relay_refused` | The relay refused the channel. | Pair again (step 4). Tell the person: "Please run `/pair-agent` again and send me the new block." |
-| `error` | The bridge hit an unexpected error. | Read `last_error` and `~/.local/state/nevoflux-muse/bridge.log`. Run `nf ensure --json`. If it repeats, report it to the person. |
+| `error` | The bridge hit an unexpected error. | Read `last_error` and `~/.local/state/nevoflux-muse/bridge.log`; under `systemd-user` supervision also `journalctl --user -u nevoflux-muse.service`. Run `nf ensure --json`. If it repeats, report it to the person. |
 | `not_ready` | The bridge reports it has no pairing or sign-in. | Run `nf status --json` again and follow `paired` and `auth`; do steps 4 and 5 as needed. |
-| `bridge_down` | The bridge is not running and could not be started; `bridge_error` says why. | Run `nf ensure --json`, then check `bridge.out` and `bridge.log` in `~/.local/state/nevoflux-muse/` and `install.log`. If the error mentions an unreadable state file, see "Change pairing or account". |
+| `bridge_down` | The bridge is not running and could not be started; `bridge_error` says why. | Run `nf ensure --json`, then check `bridge.out` (unused under `systemd-user` supervision: use `journalctl --user -u nevoflux-muse.service` there) and `bridge.log` in `~/.local/state/nevoflux-muse/`, and `install.log`. If the error mentions an unreadable state file, see "Change pairing or account". |
 
 An occasional `connecting` or `head_offline` comes from the hourly VM rebuild. Do not
 reinstall: wait and keep polling, the bridge reconnects by itself and the watchdog restarts
@@ -276,7 +286,8 @@ try again.
   `{"revoked": ..., "removed": [...], "left": [...], "state_dir": "..."}`. If it exits 1
   (`revoked` is `false`) the account service could not be reached: run it again later. Use
   `nf reset --local-only` only if the person agrees the token may stay valid on the server.
-  Then start again at step 4.
+  `nf reset` also deletes the `supervision` file: run `~/.local/bin/nf setup --json` again
+  (before pairing again) to restore it. Then start again at step 4.
 
 ## Uninstall
 

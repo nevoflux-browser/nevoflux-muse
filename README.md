@@ -31,7 +31,7 @@ Every command is non-interactive and takes `--json`.
 ```sh
 printf '%s\n' '<the block from /pair-agent>' | nf pair --from-stdin
 nf auth begin          # prints a URL and a code for the person to approve
-nf status              # repeat every 5 s until auth is "ok"; state "ready" when done
+nf status              # repeat every 5 s until auth is "ok"; state "connected" when done
 ```
 
 Once paired and signed in, a resident bridge keeps the connection to the browser

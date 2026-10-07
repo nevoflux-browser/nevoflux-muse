@@ -100,6 +100,61 @@ def run_systemctl(*args: str) -> int:
         return 127
 
 
+_UNIT = """[Unit]
+Description=NevoFlux Muse bridge
+
+[Service]
+ExecStart={nf} daemon
+Restart=on-failure
+RestartSec=5
+RestartPreventExitStatus={not_ready}
+{environment}
+[Install]
+WantedBy=default.target
+"""
+
+
+def unit_path() -> Path:
+    return Path.home() / ".config" / "systemd" / "user" / UNIT_NAME
+
+
+def unit_text(d: Path) -> str:
+    """The user unit that keeps the bridge running; `nf` is this interpreter's console script."""
+    nf = Path(sys.executable).with_name("nf")
+    environment = f"Environment=NF_HOME={d}\n" if os.environ.get("NF_HOME") else ""
+    return _UNIT.format(nf=nf, not_ready=EXIT_NOT_READY, environment=environment)
+
+
+def setup(d: Path, *, service: bool = True) -> dict:
+    """Choose how the bridge is kept running, record it, and (re)start the bridge if ready.
+
+    The unit is enabled, not started: setup.sh runs before pairing, and the bridge starts
+    once `ensure` finds pairing and sign-in complete. Re-running it (after an upgrade)
+    restarts a running bridge so the new code takes over."""
+    _require()
+    unit = None
+    if service and run_systemctl("show-environment") == 0:
+        mode, unit = "systemd-user", unit_path()
+        unit.parent.mkdir(parents=True, exist_ok=True)
+        unit.write_text(unit_text(d), encoding="utf-8")
+        if run_systemctl("daemon-reload") != 0 or run_systemctl("enable", UNIT_NAME) != 0:
+            raise ipc.BridgeDown(f"systemctl --user could not enable {UNIT_NAME}")
+    else:
+        mode = "detached+watchdog"
+    state.write_supervision(d, mode)
+    if alive(d):
+        stop(d)
+    started = ensure(d) if ready(d) else False
+    return {"supervision": mode, "started": started, "unit": str(unit) if unit else None}
+
+
+def remove_unit() -> None:
+    run_systemctl("disable", "--now", UNIT_NAME)
+    with contextlib.suppress(FileNotFoundError):
+        unit_path().unlink()
+    run_systemctl("daemon-reload")
+
+
 def ensure(d: Path, timeout: float = START_TIMEOUT) -> bool:
     """Make sure a bridge of this version serves d. True if this call started it.
 

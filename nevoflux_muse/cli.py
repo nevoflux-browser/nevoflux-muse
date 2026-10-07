@@ -187,6 +187,21 @@ def _daemon(args: argparse.Namespace) -> int:
     return 0
 
 
+def _setup(args: argparse.Namespace) -> int:
+    from . import daemon
+    d = state.state_dir()
+    try:
+        result = daemon.setup(d, service=not args.no_service)
+    except _bridge_errors() as e:
+        return _failed(args, e)
+    if args.json:
+        print(json.dumps(result))
+    else:
+        started = "; bridge started" if result["started"] else ""
+        print(f"Supervision: {result['supervision']}{started}.")
+    return 0
+
+
 def _positive(text: str) -> float:
     try:
         value = float(text)
@@ -413,6 +428,10 @@ def _parser() -> tuple[argparse.ArgumentParser, argparse.ArgumentParser]:
                     "start a device sign-in and return at once; `nf status` finishes it")
     begin.add_argument("--reset", action="store_true",
                        help="revoke the current sign-in first (to switch accounts)")
+    setup_cmd = command(sub, "setup", _setup,
+                        "choose how the bridge is kept running (setup.sh runs this)")
+    setup_cmd.add_argument("--no-service", action="store_true",
+                           help="do not use a systemd user unit; rely on the watchdog")
     command(sub, "status", _status, "where pairing and sign-in stand")
     command(sub, "unpair", _unpair, "forget the paired browser, keep the account login")
     reset = command(sub, "reset", _reset,

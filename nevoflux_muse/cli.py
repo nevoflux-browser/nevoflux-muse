@@ -148,8 +148,17 @@ def _ensure(args: argparse.Namespace) -> int:
     d = state.state_dir()
     try:
         started = daemon.ensure(d)
+    except daemon.NotReady:
+        # Not an error for a watchdog: the person has not finished pairing yet.
+        print(json.dumps({"running": False, "reason": "not_ready"}) if args.json
+              else "Not paired or not signed in yet: nothing to start.")
+        return 0
     except _bridge_errors() as e:
-        return _failed(args, e)
+        if args.json:
+            print(json.dumps({"running": False, "reason": "failed", "error": str(e)}))
+        else:
+            print(f"nf: {e}", file=sys.stderr)
+        return 1
     if args.json:
         print(json.dumps({"running": True, "started": started}))
     else:
@@ -169,6 +178,8 @@ def _daemon(args: argparse.Namespace) -> int:
             return daemon.run_foreground(d)
         daemon.ensure(d)
         pid = (daemon.alive(d) or {}).get("pid")
+        if pid is None:
+            raise ipc.BridgeDown("the bridge started but does not answer")
     except _bridge_errors() as e:
         return _failed(args, e)
     print(json.dumps({"running": True, "pid": pid}) if args.json
@@ -307,6 +318,9 @@ def _status(args: argparse.Namespace) -> int:
         out["state"] = "ready"
     if out["state"] == "ready":
         _bridge_status(d, out, approved=outcome is not None and outcome.status == "approved")
+    mode = state.supervision(d)
+    if mode is not None:
+        out["supervision"] = mode
     if outcome is not None and outcome.error:
         out["last_error"] = outcome.error
     if args.json:

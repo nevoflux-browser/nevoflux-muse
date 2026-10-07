@@ -258,3 +258,49 @@ async def test_ensure_replaces_a_bridge_of_another_version(world, monkeypatch):
     monkeypatch.setattr(daemon, "__version__", "99.0.0")  # as after `pip install -U`
     assert await asyncio.to_thread(daemon.ensure, world.d) is True
     assert daemon.alive(world.d)["pid"] != pid
+
+
+async def test_foreground_not_ready_exits_3(tmp_path, monkeypatch):
+    d = tmp_path / "empty"
+    monkeypatch.setenv("NF_HOME", str(d))
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable, "-m", "nevoflux_muse.cli", "daemon", cwd=str(tmp_path))
+    assert await asyncio.wait_for(proc.wait(), 20) == daemon.EXIT_NOT_READY
+
+
+async def test_ensure_uses_systemd_when_supervised(world, monkeypatch):
+    calls = []
+    monkeypatch.setattr(daemon, "run_systemctl",
+                        lambda *a: calls.append(a) or daemon.detach(world.d) or 0)
+    state.write_supervision(world.d, "systemd-user")
+    assert await asyncio.to_thread(daemon.ensure, world.d) is True
+    assert calls == [("start", daemon.UNIT_NAME)]
+
+
+async def test_lock_retry_absorbs_a_brief_holder(world):
+    import fcntl
+    state.ensure_dir(world.d)
+    fd = os.open(world.d / daemon.LOCK_FILE, os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    threading.Timer(0.2, os.close, [fd]).start()  # held for 0.2 s, like a _still_running probe
+    assert await asyncio.to_thread(daemon.ensure, world.d) is True
+
+
+async def test_stop_follows_a_replacement_bridge(world, monkeypatch):
+    await asyncio.to_thread(daemon.ensure, world.d)
+    first = daemon.alive(world.d)["pid"]
+    real_request = ipc.request
+    intercepted = []
+
+    def swallow_shutdown(d, msg, timeout):
+        if msg.get("op") == "shutdown" and not intercepted:  # the first bridge ignores it...
+            intercepted.append(1)
+            os.kill(first, signal.SIGKILL)  # ...dies, and a parallel ensure starts another
+            daemon.detach(d)
+            return {"ok": True}
+        return real_request(d, msg, timeout)
+
+    monkeypatch.setattr(ipc, "request", swallow_shutdown)
+    assert await asyncio.to_thread(daemon.stop, world.d, 1.0) is True
+    monkeypatch.setattr(ipc, "request", real_request)
+    assert daemon.alive(world.d) is None

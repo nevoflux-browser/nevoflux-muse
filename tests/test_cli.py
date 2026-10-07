@@ -625,3 +625,40 @@ def test_ensure_with_an_unreadable_pairing(home, capsys, monkeypatch):
     code, out = run_json(capsys, "ensure")
     assert code == 1
     assert PAIRING_FILE in out["error"] and "nf reset --local-only" in out["error"]
+
+
+def test_ensure_not_ready_exits_0(home, capsys, monkeypatch):
+    from nevoflux_muse import daemon
+    monkeypatch.setattr(daemon, "SUPPORTED", True)
+
+    def not_ready(d):
+        raise daemon.NotReady("pair first")
+
+    monkeypatch.setattr(daemon, "ensure", not_ready)
+    assert run_json(capsys, "ensure") == (0, {"running": False, "reason": "not_ready"})
+
+
+def test_ensure_failure_has_a_reason(home, capsys, monkeypatch):
+    from nevoflux_muse import daemon, ipc
+    monkeypatch.setattr(daemon, "SUPPORTED", True)
+
+    def broken(d):
+        raise ipc.BridgeDown("the bridge did not start")
+
+    monkeypatch.setattr(daemon, "ensure", broken)
+    assert run_json(capsys, "ensure") == (1, {"running": False, "reason": "failed",
+                                             "error": "the bridge did not start"})
+
+
+def test_detach_without_a_pid_fails(home, capsys, monkeypatch):
+    from nevoflux_muse import daemon
+    FakeBridge(monkeypatch)
+    answers = iter([None, None])  # not running before; still no answer after ensure
+    monkeypatch.setattr(daemon, "alive", lambda d: next(answers))
+    code, out = run_json(capsys, "daemon", "--detach")
+    assert code == 1 and "does not answer" in out["error"]
+
+
+def test_status_reports_supervision(home, capsys):
+    st.write_supervision(home, "detached+watchdog")
+    assert run_json(capsys, "status")[1]["supervision"] == "detached+watchdog"

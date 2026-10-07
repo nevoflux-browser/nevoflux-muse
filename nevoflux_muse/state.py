@@ -6,6 +6,7 @@ One agent pairs with one head. The state directory holds:
 - `account.json`: the NevoFlux account token from the device grant, and the
   account service that issued it (revocation must go back there)
 - `auth_pending.json`: a device grant waiting for the person to approve it
+- `supervision`: how the bridge is kept running (set by `nf setup`)
 - the bridge's socket, lock, log and output (see daemon.py)
 
 All are secrets: the directory is created 0700 and the files 0600, written
@@ -30,9 +31,12 @@ APP = "nevoflux-muse"
 PAIRING_FILE = "pairing.json"
 ACCOUNT_FILE = "account.json"
 AUTH_PENDING_FILE = "auth_pending.json"
+SUPERVISION_FILE = "supervision"
+SUPERVISION_MODES = ("systemd-user", "detached+watchdog")
 BRIDGE_FILES = ("bridge.sock", "bridge.lock", "bridge.out", "bridge.log",
                 "bridge.log.1", "bridge.log.2", "bridge.log.3")
-KNOWN_FILES = (ACCOUNT_FILE, AUTH_PENDING_FILE, PAIRING_FILE, *BRIDGE_FILES)
+KNOWN_FILES = (ACCOUNT_FILE, AUTH_PENDING_FILE, PAIRING_FILE, SUPERVISION_FILE,
+               *BRIDGE_FILES)
 SCHEMA = 1
 NUMBER = (int, float)  # a field type: JSON numbers (never bool)
 
@@ -103,6 +107,23 @@ def read_state(d: Path, name: str, fields: Mapping[str, type | tuple[type, ...]]
         if isinstance(value, float) and not math.isfinite(value):
             raise UnsupportedState(name)
     return obj
+
+
+def supervision(d: Path) -> str | None:
+    try:
+        mode = (d / SUPERVISION_FILE).read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        return None
+    return mode if mode in SUPERVISION_MODES else None
+
+
+def write_supervision(d: Path, mode: str) -> None:
+    if mode not in SUPERVISION_MODES:
+        raise ValueError(f"unknown supervision mode {mode!r}")
+    ensure_dir(d)
+    path = d / SUPERVISION_FILE
+    path.write_text(mode + "\n", encoding="utf-8")
+    os.chmod(path, 0o600)
 
 
 def unpair(d: Path) -> bool:

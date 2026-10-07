@@ -11,6 +11,10 @@ A detached bridge writes its stdout and stderr to bridge.out (truncated at each
 start) and its log to bridge.log, rotated at 1 MiB. The process runs with umask
 077: everything it creates is the owner's alone. It runs in the state directory,
 so nothing in the caller's working directory can shadow a module it imports.
+
+Under systemd-user supervision (`nf setup`) the unit starts the bridge; `ensure` asks
+systemd instead of detaching, and a bridge that is not ready exits 3, which the unit
+does not restart.
 """
 
 from __future__ import annotations
@@ -34,6 +38,9 @@ LOCK_FILE = "bridge.lock"
 LOG_FILE = "bridge.log"
 OUT_FILE = "bridge.out"
 START_TIMEOUT = 10.0
+EXIT_NOT_READY = 3
+UNIT_NAME = "nevoflux-muse.service"
+LOCK_RETRY = 1.0
 
 log = logging.getLogger(__name__)
 
@@ -83,6 +90,16 @@ def detach(d: Path) -> None:
             env={**os.environ, "NF_HOME": str(d)}, close_fds=True, cwd=str(d))
 
 
+def run_systemctl(*args: str) -> int:
+    """`systemctl --user …`; its exit code, 127 when it cannot run at all."""
+    try:
+        return subprocess.run(["systemctl", "--user", *args], stdin=subprocess.DEVNULL,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              timeout=30, check=False).returncode
+    except (OSError, subprocess.TimeoutExpired):
+        return 127
+
+
 def ensure(d: Path, timeout: float = START_TIMEOUT) -> bool:
     """Make sure a bridge of this version serves d. True if this call started it.
 
@@ -95,7 +112,12 @@ def ensure(d: Path, timeout: float = START_TIMEOUT) -> bool:
         raise NotReady("pair (`nf pair --from-stdin`) and sign in (`nf auth begin`) first")
     if running:
         stop(d)
-    detach(d)
+    if state.supervision(d) == "systemd-user":
+        if run_systemctl("start", UNIT_NAME) != 0:
+            raise ipc.BridgeDown(f"systemctl --user start {UNIT_NAME} failed; "
+                                 f"see `journalctl --user -u {UNIT_NAME}`")
+    else:
+        detach(d)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         time.sleep(0.1)
@@ -107,25 +129,36 @@ def ensure(d: Path, timeout: float = START_TIMEOUT) -> bool:
 def stop(d: Path, timeout: float = 5.0) -> bool:
     """Ask a running bridge to exit and wait until it is gone. False if none was running.
 
-    One that has not finished within timeout gets SIGTERM, then SIGKILL; if it still
-    cannot be seen gone, BridgeDown: the caller must not delete its files."""
+    One that has not finished within timeout gets SIGTERM, then SIGKILL, and only while
+    the same pid still answers: if a newer bridge answers instead (a parallel ensure),
+    that one is stopped next. If it still cannot be seen gone, BridgeDown: the caller
+    must not delete its files."""
     if not SUPPORTED:
         return False
     running = alive(d)
     if running is None:
         return False
-    pid = running.get("pid")
-    with contextlib.suppress(ipc.BridgeDown):
-        ipc.request(d, {"op": "shutdown"}, 2.0)
-    if _wait_gone(d, timeout):
-        return True
-    for sig, wait in ((signal.SIGTERM, 2.0), (signal.SIGKILL, 1.0)):
-        if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
-            with contextlib.suppress(OSError):
-                os.kill(pid, sig)
-        if _wait_gone(d, wait):
+    deadline = time.monotonic() + 3 * (timeout + 3.0)
+    while True:
+        pid = running.get("pid")
+        with contextlib.suppress(ipc.BridgeDown):
+            ipc.request(d, {"op": "shutdown"}, 2.0)
+        if _wait_gone(d, timeout):
             return True
-    raise ipc.BridgeDown("the bridge did not stop")
+        replaced = None
+        for sig, wait in ((signal.SIGTERM, 2.0), (signal.SIGKILL, 1.0)):
+            now = alive(d)
+            if now is not None and now.get("pid") != pid:
+                replaced = now
+                break
+            if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
+                with contextlib.suppress(OSError):
+                    os.kill(pid, sig)
+            if _wait_gone(d, wait):
+                return True
+        if replaced is None or time.monotonic() >= deadline:
+            raise ipc.BridgeDown("the bridge did not stop")
+        running = replaced
 
 
 def _wait_gone(d: Path, timeout: float) -> bool:
@@ -152,7 +185,8 @@ def held(d: Path, timeout: float = 10.0):
     try:
         deadline = time.monotonic() + timeout
         while True:
-            stop(d)
+            left = deadline - time.monotonic()
+            stop(d, timeout=max(0.5, min(5.0, left - 3.0)))
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 break
@@ -203,12 +237,17 @@ def run_foreground(d: Path) -> int:
     state.ensure_dir(d)
     fd = os.open(d / LOCK_FILE, os.O_RDWR | os.O_CREAT, 0o600)
     try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            print("nf: another bridge is already running for this state directory",
-                  file=sys.stderr)
-            return 1
+        until = time.monotonic() + LOCK_RETRY
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:  # a probe holds it for an instant; a bridge keeps it
+                if time.monotonic() >= until:
+                    print("nf: another bridge is already running for this state directory",
+                          file=sys.stderr)
+                    return 1
+                time.sleep(0.05)
         os.umask(0o077)  # only once we are the bridge: the refusal path leaves the caller alone
         _setup_logging(d)
         return asyncio.run(_main(d))
@@ -221,7 +260,7 @@ async def _main(d: Path) -> int:
     await bridge.start()
     if bridge.state == "not_ready":
         log.error("not paired or not signed in; the bridge exits")
-        return 1
+        return EXIT_NOT_READY
     path = ipc.socket_path(d)
     path.unlink(missing_ok=True)
     server = await serve(bridge, path)
@@ -233,12 +272,14 @@ async def _main(d: Path) -> int:
     try:
         await bridge.wait_stopped()
     finally:
-        await bridge.stop()  # first: calls in flight then end with connection_lost
-        server.close()
-        with contextlib.suppress(asyncio.TimeoutError):
-            await asyncio.wait_for(server.wait_closed(), 2)
-        with contextlib.suppress(FileNotFoundError):
-            if path.stat().st_ino == inode:  # still ours: a newer bridge may own the name
-                path.unlink()
-        log.info("bridge stopped")
+        try:
+            await bridge.stop()  # first: calls in flight then end with connection_lost
+        finally:
+            server.close()
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(server.wait_closed(), 2)
+            with contextlib.suppress(FileNotFoundError):
+                if path.stat().st_ino == inode:  # still ours: a newer bridge may own the name
+                    path.unlink()
+            log.info("bridge stopped")
     return 0

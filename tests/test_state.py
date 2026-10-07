@@ -140,3 +140,20 @@ def test_read_state_rejects_non_finite_numbers(tmp_path, value):
     (tmp_path / state.AUTH_PENDING_FILE).write_text(f'{{"v": 1, "interval": {value}}}')
     with pytest.raises(state.UnsupportedState):
         state.read_state(tmp_path, state.AUTH_PENDING_FILE, {"interval": state.NUMBER})
+
+
+def test_supervision_round_trip(tmp_path):
+    assert state.supervision(tmp_path) is None
+    state.write_supervision(tmp_path, "systemd-user")
+    assert state.supervision(tmp_path) == "systemd-user"
+    assert state.SUPERVISION_FILE in state.KNOWN_FILES
+
+
+def test_supervision_ignores_junk(tmp_path):
+    (tmp_path / state.SUPERVISION_FILE).write_text("launchd\n")
+    assert state.supervision(tmp_path) is None
+
+
+def test_write_supervision_rejects_unknown_modes(tmp_path):
+    with pytest.raises(ValueError):
+        state.write_supervision(tmp_path, "cron")

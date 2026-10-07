@@ -9,7 +9,10 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import os
+import shutil
 import sys
+from pathlib import Path
 
 from . import PROTOCOL_MAX, PROTOCOL_MIN, __version__, auth, ipc, pairing, state
 
@@ -395,6 +398,87 @@ def _bridge_status(d, out: dict, approved: bool) -> None:
         out["last_error"] = reply["last_error"]
 
 
+_NEXT_STEPS = [
+    "In NevoFlux, remove this agent (/unpair): the browser still lists it.",
+    "Delete the Muse scheduled task that runs ensure.sh.",
+]
+
+
+def _install_root() -> Path | None:
+    """Where setup.sh installed us: NF_INSTALL_ROOT, or the venv's parent if it holds
+    installed_tag. None when nf was installed some other way."""
+    env = os.environ.get("NF_INSTALL_ROOT")
+    if env:
+        return Path(env)
+    root = Path(sys.prefix).parent
+    return root if (root / "installed_tag").exists() else None
+
+
+def _points_into(link: Path, root: Path) -> bool:
+    target = (link.parent / os.readlink(link)).resolve()
+    return root.resolve() in target.parents
+
+
+def _uninstall(args: argparse.Namespace) -> int:
+    from . import daemon
+    d = state.state_dir()
+    steps: list[dict] = []
+
+    def finish(ok: bool) -> int:
+        if args.json:
+            print(json.dumps({"ok": ok, "steps": steps, "next_steps": _NEXT_STEPS}))
+        else:
+            for s in steps:
+                mark = "ok" if s["ok"] else "FAILED"
+                detail = s.get("error") or s.get("skipped") or ""
+                print(f"{s['step']}: {mark}{' — ' + detail if detail else ''}")
+            print("\n".join(["Next:"] + [f"- {n}" for n in _NEXT_STEPS]) if ok else
+                  "Uninstall stopped; fix the error above and run `nf uninstall` again.")
+        return 0 if ok else 1
+
+    revoked: bool | None = None
+    error = None
+    try:
+        with daemon.held(d):
+            if daemon.SUPPORTED and state.supervision(d) == "systemd-user":
+                daemon.remove_unit()
+                steps.append({"step": "service", "ok": True})
+            try:
+                revoked = auth.revoke_and_verify(d)
+            except (auth.AccountError, state.UnsupportedState, OSError) as e:
+                revoked, error = False, str(e)
+            keep = (state.ACCOUNT_FILE,) if revoked is False else ()
+            removed, _ = state.reset(d, keep=keep)
+    except (ipc.BridgeDown, OSError) as e:
+        steps.append({"step": "stop", "ok": False, "error": str(e)})
+        return finish(False)
+    if revoked is False:
+        steps.append({"step": "revoke", "ok": False, "error": error})
+        return finish(False)
+    steps.append({"step": "revoke", "ok": True, "revoked": bool(revoked)})
+    steps.append({"step": "state", "ok": True, "removed": removed})
+    root = _install_root()
+    if root is None:
+        steps.append({"step": "install_root", "ok": True,
+                      "skipped": "nf was not installed by setup.sh"})
+    else:
+        try:
+            shutil.rmtree(root)
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            steps.append({"step": "install_root", "ok": False, "error": str(e)})
+            return finish(False)
+        steps.append({"step": "install_root", "ok": True, "path": str(root)})
+    link = Path.home() / ".local" / "bin" / "nf"
+    if root is not None and link.is_symlink() and _points_into(link, root):
+        link.unlink()
+        steps.append({"step": "link", "ok": True, "path": str(link)})
+    else:
+        steps.append({"step": "link", "ok": True, "skipped": "no link of ours"})
+    return finish(True)
+
+
 def _parser() -> tuple[argparse.ArgumentParser, argparse.ArgumentParser]:
     """The parser, and the `call` subparser (parsed intermixed: see main)."""
     parser = argparse.ArgumentParser(prog="nf")
@@ -434,6 +518,8 @@ def _parser() -> tuple[argparse.ArgumentParser, argparse.ArgumentParser]:
                            help="do not use a systemd user unit; rely on the watchdog")
     command(sub, "status", _status, "where pairing and sign-in stand")
     command(sub, "unpair", _unpair, "forget the paired browser, keep the account login")
+    command(sub, "uninstall", _uninstall,
+            "revoke the sign-in, stop the bridge, remove nevoflux-muse")
     reset = command(sub, "reset", _reset,
                     "revoke the sign-in and forget everything (run before uninstalling)")
     reset.add_argument("--local-only", action="store_true",

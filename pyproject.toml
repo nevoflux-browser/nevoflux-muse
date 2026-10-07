@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nevoflux-muse"
-version = "0.1.0"
+version = "0.2.0"
 description = "Connect a Muse agent to your NevoFlux browser — MCP over an E2E-encrypted relay."
 readme = "README.md"
 license = "MIT"

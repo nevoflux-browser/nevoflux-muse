@@ -6,9 +6,23 @@ The client an AI agent runs (in its own VM) to drive a NevoFlux browser it has
 been paired with. The protocol is documented in the head's repository:
 [`docs/muse-client-protocol.md`](https://github.com/nevoflux-browser/nevoflux-agent/blob/main/docs/muse-client-protocol.md).
 
-Status: protocol core and resident bridge. `nf pair`, `nf auth begin`, `nf status`,
-`nf tools`, `nf call`, `nf ensure`, `nf daemon`, `nf unpair`, `nf reset` and `nf version`
-work; the installer (`setup.sh`, the watchdog and `nf uninstall`) comes next.
+Status: protocol core, resident bridge and installer. `nf pair`, `nf auth begin`,
+`nf status`, `nf tools`, `nf call`, `nf ensure`, `nf daemon`, `nf setup`, `nf unpair`,
+`nf reset`, `nf uninstall` and `nf version` work.
+
+## Install
+
+On a Linux VM, an agent installs the client by following [`INSTALL.md`](INSTALL.md),
+which gives every step, its expected output and what to tell the person. In short:
+
+```sh
+git clone --depth 1 -b v0.2.0 https://github.com/nevoflux-browser/nevoflux-muse ~/.local/share/nevoflux-muse/src
+~/.local/share/nevoflux-muse/src/setup.sh
+```
+
+`setup.sh` builds a private environment, links `~/.local/bin/nf`, and runs `nf setup`,
+which keeps the bridge running with a systemd user unit or, without one, a watchdog
+(`ensure.sh`, run every 5 minutes).
 
 ## Commands
 
@@ -31,8 +45,14 @@ printf '%s' '{"text": "..."}' | nf call browser_type --args-stdin
 nf ensure                          # start the bridge if it is not running (watchdogs)
 ```
 
-The bridge needs Linux or macOS. It logs to `bridge.log` in the state directory
-(tool names, outcomes and timings; never arguments or results).
+`nf setup` chooses how the bridge is kept running (`setup.sh` runs it); `nf uninstall`
+revokes the sign-in, stops the bridge and removes the installation.
+
+The bridge needs Linux or macOS. On Windows `nf daemon`, `ensure`, `tools`, `call` and
+`setup` exit 1 with "unsupported on Windows", and `nf status` stops at `ready`.
+
+The bridge logs to `bridge.log` in the state directory (tool names, outcomes and timings;
+never arguments or results).
 
 ## State and uninstalling
 
@@ -47,15 +67,18 @@ on Windows, `~/Library/Application Support/nevoflux-muse` on macOS, and
   in NevoFlux, but without the key the agent can no longer connect.
 - `nf reset` stops the bridge, revokes the account token on the server, checks that
   it no longer works, then forgets everything. If it cannot reach the account
-  service it keeps the token and exits 1: run it again later. `pip uninstall` does not
-  touch this directory, so uninstall with:
+  service it keeps the token and exits 1: run it again later. Use it to forget the
+  state without uninstalling.
+- `nf uninstall` does the same revocation, then removes the installation (the install
+  root and the `~/.local/bin/nf` link) and prints what is left for the person to do:
+  remove the agent in NevoFlux and delete the watchdog task.
 
 ```sh
-nf reset && pip uninstall nevoflux-muse
+nf uninstall
 ```
 
-Do not uninstall after a failed `nf reset`: the token would stay valid on the
-server. `nf reset --local-only` deletes it locally regardless.
+Do not delete files by hand after a failed `nf uninstall` or `nf reset`: the token would
+stay valid on the server. `nf reset --local-only` deletes it locally regardless.
 
 ## Development
 

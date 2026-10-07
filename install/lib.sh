@@ -21,17 +21,27 @@ nf_log() {
     printf '%s\n' "$nf_line" >&2
 }
 
-# A mkdir lock: atomic everywhere, unlike flock. The holder's pid is published by an atomic
-# mv, so a contender never sees a half-made lock; a lock with no pid yet is held until it
-# is a minute old. A live holder is never robbed. A dead holder's lock is cleared by an
-# atomic rename, which only one contender wins.
+# This boot's identity; empty where the kernel does not provide one (macOS).
+nf_boot_id() {
+    cat /proc/sys/kernel/random/boot_id 2>/dev/null || true
+}
+
+# A mkdir lock: atomic everywhere, unlike flock. The lock's `pid` file holds "<pid> <boot_id>",
+# published by an atomic mv, so a contender never sees a half-made lock; a lock with no pid yet
+# is held until it is a minute old. A lock from a previous boot is stale whatever its pid says
+# (the VM is rebuilt and pids get reused). A live holder is otherwise never robbed, except,
+# where there is no boot id to tell, once it is ten minutes old. A stale lock is cleared by
+# an atomic rename, which only one contender wins.
+# On failure NF_LOCK_HOLDER names the holder.
 nf_lock() {
+    NF_LOCK_HOLDER=
     mkdir -p "$NF_ROOT" || return 1
+    nf_boot=$(nf_boot_id)
     nf_try=0
     while [ "$nf_try" -lt 3 ]; do
         nf_try=$((nf_try + 1))
         if mkdir "$NF_ROOT/.lock" 2>/dev/null; then
-            if printf '%s\n' "$$" > "$NF_ROOT/.lock/pid.tmp" \
+            if printf '%s %s\n' "$$" "$nf_boot" > "$NF_ROOT/.lock/pid.tmp" \
                 && mv "$NF_ROOT/.lock/pid.tmp" "$NF_ROOT/.lock/pid"; then
                 return 0
             fi
@@ -39,19 +49,32 @@ nf_lock() {
             return 1
         fi
         [ -d "$NF_ROOT/.lock" ] || continue
-        nf_old=$(cat "$NF_ROOT/.lock/pid" 2>/dev/null || true)
+        nf_raw=$(cat "$NF_ROOT/.lock/pid" 2>/dev/null || true)
+        nf_old=$(printf '%s' "$nf_raw" | cut -d ' ' -f 1)
+        nf_oldboot=$(printf '%s' "$nf_raw" | cut -s -d ' ' -f 2)
+        nf_held=0
         if [ -n "$nf_old" ]; then
-            if kill -0 "$nf_old" 2>/dev/null; then
-                return 1
+            if [ -n "$nf_boot" ] && [ -n "$nf_oldboot" ] && [ "$nf_boot" != "$nf_oldboot" ]; then
+                nf_held=0
+            elif kill -0 "$nf_old" 2>/dev/null; then
+                nf_held=1
+                if { [ -z "$nf_boot" ] || [ -z "$nf_oldboot" ]; } \
+                    && [ -n "$(find "$NF_ROOT/.lock" -maxdepth 0 -mmin +10 2>/dev/null)" ]; then
+                    nf_held=0
+                fi
             fi
         elif [ -z "$(find "$NF_ROOT/.lock" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
+            nf_held=1
+        fi
+        if [ "$nf_held" = 1 ]; then
+            NF_LOCK_HOLDER=$nf_old
             return 1
         fi
         nf_stale="$NF_ROOT/.lock.stale.$$"
         rm -rf "$nf_stale"
         if mv "$NF_ROOT/.lock" "$nf_stale" 2>/dev/null; then
             nf_seen=$(cat "$nf_stale/pid" 2>/dev/null || true)
-            if [ "$nf_seen" != "$nf_old" ]; then
+            if [ "$nf_seen" != "$nf_raw" ]; then
                 # Someone else's fresh lock: put it back.
                 mv "$nf_stale" "$NF_ROOT/.lock" 2>/dev/null || rm -rf "$nf_stale"
                 return 1
@@ -65,7 +88,7 @@ nf_lock() {
 
 # Releases the lock only if this process holds it.
 nf_unlock() {
-    if [ "$(cat "$NF_ROOT/.lock/pid" 2>/dev/null || true)" = "$$" ]; then
+    if [ "$(cut -d ' ' -f 1 2>/dev/null < "$NF_ROOT/.lock/pid" || true)" = "$$" ]; then
         rm -rf "$NF_ROOT/.lock"
     fi
     return 0
@@ -236,8 +259,11 @@ nf_install_deps() {
             --find-links "$NF_ROOT/wheelhouse" nevoflux-muse >> "$NF_ROOT/pip.out" 2>&1
     else
         nf_log "no project wheel in the wheelhouse; installing from $NF_SRC"
-        "$nf_vpy" -m pip install --disable-pip-version-check --no-deps "$NF_SRC" \
-            >> "$NF_ROOT/pip.out" 2>&1
+        NF_ONLINE=1
+        "$nf_vpy" -m pip install --disable-pip-version-check --require-hashes \
+            -r "$NF_SRC/install/build.lock" >> "$NF_ROOT/pip.out" 2>&1 || return 1
+        "$nf_vpy" -m pip install --disable-pip-version-check --no-deps --no-build-isolation \
+            "$NF_SRC" >> "$NF_ROOT/pip.out" 2>&1
     fi
 }
 

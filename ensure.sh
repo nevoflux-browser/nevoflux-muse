@@ -10,7 +10,10 @@ NF_SRC=$(cat "$root/src_path" 2>/dev/null || printf '%s' "$root/src")
 # shellcheck source=install/lib.sh
 . "$NF_SRC/install/lib.sh"
 
-nf_lock || exit 0  # another setup.sh or ensure.sh is at it
+if ! nf_lock; then
+    nf_log "another setup.sh/ensure.sh holds the lock (pid ${NF_LOCK_HOLDER:-unknown}); skipping"
+    exit 0
+fi
 trap nf_unlock EXIT
 trap 'nf_unlock; exit 130' INT
 trap 'nf_unlock; exit 143' TERM

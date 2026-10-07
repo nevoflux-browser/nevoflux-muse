@@ -64,7 +64,8 @@ test "$(cat "$root/.lock/pid")" = "$holder"
 before=$(wc -l < "$root/install.log")
 ln -sf /nonexistent/python3 "$root/venv/bin/python"
 sh "$root/ensure.sh"
-test "$(wc -l < "$root/install.log")" = "$before"
+test "$(wc -l < "$root/install.log")" = "$((before + 1))"
+tail -n 1 "$root/install.log" | grep -q "holds the lock (pid $holder); skipping"
 test "$(cat "$root/.lock/pid")" = "$holder"
 if "$root/venv/bin/python" -c 'import nevoflux_muse' 2>/dev/null; then
     echo "ensure.sh touched the venv while the lock was held"; exit 1
@@ -72,6 +73,16 @@ fi
 wait "$holder"
 sh "$root/ensure.sh"
 grep -q "clearing a stale lock" "$root/install.log"
+"$root/venv/bin/python" -c 'import nevoflux_muse'
+test ! -e "$root/.lock"
+
+echo "== a lock from a previous boot is stale even when its pid is alive"
+mkdir "$root/.lock"
+printf '%s 00000000-0000-0000-0000-000000000000\n' "$$" > "$root/.lock/pid"
+if [ ! -r /proc/sys/kernel/random/boot_id ]; then echo "no boot_id on this runner"; exit 1; fi
+ln -sf /nonexistent/python3 "$root/venv/bin/python"
+sh "$root/ensure.sh"
+grep -q "clearing a stale lock (pid $$)" "$root/install.log"
 "$root/venv/bin/python" -c 'import nevoflux_muse'
 test ! -e "$root/.lock"
 

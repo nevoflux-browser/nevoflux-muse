@@ -104,7 +104,7 @@ _UNIT = """[Unit]
 Description=NevoFlux Muse bridge
 
 [Service]
-ExecStart={nf} daemon
+ExecStart={exec_start}
 Restart=on-failure
 RestartSec=5
 RestartPreventExitStatus={not_ready}
@@ -118,11 +118,19 @@ def unit_path() -> Path:
     return Path.home() / ".config" / "systemd" / "user" / UNIT_NAME
 
 
+def _quote(text: str) -> str:
+    """One double-quoted systemd word: spaces are safe, and `%` is not a specifier."""
+    escaped = text.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
+    return f'"{escaped}"'
+
+
 def unit_text(d: Path) -> str:
-    """The user unit that keeps the bridge running; `nf` is this interpreter's console script."""
-    nf = Path(sys.executable).with_name("nf")
-    environment = f"Environment=NF_HOME={d}\n" if os.environ.get("NF_HOME") else ""
-    return _UNIT.format(nf=nf, not_ready=EXIT_NOT_READY, environment=environment)
+    """The user unit that keeps the bridge running, started from this interpreter."""
+    exec_start = f"{_quote(sys.executable)} -m nevoflux_muse.cli daemon"
+    environment = ""
+    if os.environ.get("NF_HOME"):
+        environment = "Environment=" + _quote("NF_HOME=" + str(d)) + "\n"
+    return _UNIT.format(exec_start=exec_start, not_ready=EXIT_NOT_READY, environment=environment)
 
 
 def setup(d: Path, *, service: bool = True) -> dict:
@@ -135,12 +143,17 @@ def setup(d: Path, *, service: bool = True) -> dict:
     unit = None
     if service and run_systemctl("show-environment") == 0:
         mode, unit = "systemd-user", unit_path()
-        unit.parent.mkdir(parents=True, exist_ok=True)
-        unit.write_text(unit_text(d), encoding="utf-8")
+        try:
+            unit.parent.mkdir(parents=True, exist_ok=True)
+            unit.write_text(unit_text(d), encoding="utf-8")
+        except OSError as e:
+            raise ipc.BridgeDown(f"cannot write {unit}: {e.strerror}") from e
         if run_systemctl("daemon-reload") != 0 or run_systemctl("enable", UNIT_NAME) != 0:
             raise ipc.BridgeDown(f"systemctl --user could not enable {UNIT_NAME}")
     else:
         mode = "detached+watchdog"
+        if unit_path().exists():  # a unit left by an earlier run must not start a second bridge
+            remove_unit()
     state.write_supervision(d, mode)
     if alive(d):
         stop(d)

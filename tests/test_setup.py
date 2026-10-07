@@ -1,4 +1,5 @@
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -36,18 +37,28 @@ def env(tmp_path, monkeypatch):
 
 def test_unit_text(tmp_path, monkeypatch):
     monkeypatch.delenv("NF_HOME", raising=False)
-    text = daemon.unit_text(tmp_path)
-    assert "ExecStart=" in text and text.splitlines()[text.splitlines().index("[Service]") + 1] \
-        .endswith(" daemon")
+    lines = daemon.unit_text(tmp_path).splitlines()
+    assert f'ExecStart="{sys.executable}" -m nevoflux_muse.cli daemon' in [
+        line.replace("\\\\", "\\") for line in lines]
     for line in ("Restart=on-failure", "RestartSec=5", "RestartPreventExitStatus=3",
                  "WantedBy=default.target"):
-        assert line in text.splitlines()
-    assert "Environment=NF_HOME" not in text
+        assert line in lines
+    assert not any(line.startswith("Environment=") for line in lines)
 
 
 def test_unit_text_carries_nf_home(tmp_path, monkeypatch):
     monkeypatch.setenv("NF_HOME", str(tmp_path / "s"))
-    assert f"Environment=NF_HOME={tmp_path / 's'}" in daemon.unit_text(tmp_path / "s")
+    path = str(tmp_path / "s").replace("\\", "\\\\")
+    assert f'Environment="NF_HOME={path}"' in daemon.unit_text(tmp_path / "s").splitlines()
+
+
+def test_unit_text_quotes_spaces_and_percent(monkeypatch):
+    monkeypatch.setenv("NF_HOME", "/a b/50%/q\"x")
+    monkeypatch.setattr(sys, "executable", "/opt/my py/bin/python")
+    lines = daemon.unit_text(Path("/a b/50%/q\"x")).splitlines()
+    assert 'ExecStart="/opt/my py/bin/python" -m nevoflux_muse.cli daemon' in lines
+    home = str(Path("/a b/50%/q\"x")).replace("\\", "\\\\")  # backslashes (Windows) doubled
+    assert 'Environment="NF_HOME=' + home.replace('"', '\\"').replace("%", "%%") + '"' in lines
 
 
 def test_setup_with_systemd(env):
@@ -108,3 +119,20 @@ def test_cli_setup_on_windows(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(daemon, "SUPPORTED", False)
     assert main(["setup", "--json"]) == 1
     assert "unsupported on Windows" in json.loads(capsys.readouterr().out)["error"]
+
+
+def test_switching_to_no_service_removes_the_old_unit(env):
+    daemon.setup(env.d)
+    env.calls.clear()
+    daemon.setup(env.d, service=False)
+    assert not daemon.unit_path().exists()
+    assert ("disable", "--now", "nevoflux-muse.service") in env.calls
+
+
+def test_unwritable_unit_is_an_error_not_a_traceback(env, monkeypatch, capsys):
+    def deny(self, *a, **k):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(Path, "write_text", deny)
+    assert main(["setup", "--json"]) == 1
+    assert "cannot write" in json.loads(capsys.readouterr().out)["error"]

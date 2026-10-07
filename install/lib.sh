@@ -216,6 +216,8 @@ nf_refresh_wheelhouse() {
     mkdir -p "$nf_wh" || return 1
     rm -rf "$nf_proj"
     mkdir -p "$nf_proj" || return 1
+    # setuptools reuses build/lib: a module deleted in a later tag would still ship.
+    rm -rf "$NF_SRC/build" "$NF_SRC"/*.egg-info || return 1
     "$nf_rv/bin/python" -m pip install --disable-pip-version-check --require-hashes \
         -r "$NF_SRC/install/build.lock" >> "$NF_ROOT/pip.out" 2>&1 || return 1
     "$nf_rv/bin/python" -m pip download --disable-pip-version-check --require-hashes \

@@ -40,10 +40,26 @@ def test_unit_text(tmp_path, monkeypatch):
     lines = daemon.unit_text(tmp_path).splitlines()
     assert f'ExecStart="{sys.executable}" -m nevoflux_muse.cli daemon' in [
         line.replace("\\\\", "\\") for line in lines]
-    for line in ("Restart=on-failure", "RestartSec=5", "RestartPreventExitStatus=3",
+    for line in ("Restart=on-failure", "RestartSec=5", "RestartPreventExitStatus=3 4",
                  "WantedBy=default.target"):
         assert line in lines
     assert not any(line.startswith("Environment=") for line in lines)
+
+
+def test_ensure_falls_back_to_detach_when_systemctl_start_fails(tmp_path, monkeypatch):
+    d = tmp_path / "state"
+    monkeypatch.setattr(daemon, "SUPPORTED", True)
+    monkeypatch.setattr(daemon, "run_systemctl", lambda *a: 1)
+    state.write_supervision(d, "systemd-user")
+    detached = []
+    monkeypatch.setattr(daemon, "ready", lambda d: True)
+    monkeypatch.setattr(daemon, "detach", detached.append)
+    monkeypatch.setattr(daemon, "alive",
+                        lambda d: {"ok": True, "version": "other"} if detached else None)
+    monkeypatch.setattr(daemon, "stop", lambda d, timeout=5.0: True)
+    monkeypatch.setattr(daemon.time, "sleep", lambda s: None)
+    assert daemon.ensure(d) is True
+    assert detached == [d]
 
 
 def test_unit_text_carries_nf_home(tmp_path, monkeypatch):

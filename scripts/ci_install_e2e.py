@@ -1,7 +1,7 @@
 """CI only: drive an installed nf end to end (acceptance criteria 1 and 4).
 
 Run with the installed venv's Python after setup.sh, with HOME, NF_HOME and
-NF_INSTALL_ROOT pointing at a scratch home: starts a FakeRelay, a FakeHead and the
+NF_INSTALL_ROOT unset or pointing at a scratch home: starts a FakeRelay, a FakeHead and the
 account double in this process, then runs ~/.local/bin/nf pair, auth begin, status
 (until connected), call and uninstall, and checks what uninstall left behind.
 """
@@ -19,7 +19,8 @@ from nevoflux_muse import crypto, ipc, state
 from nevoflux_muse.testing import AccountDouble, FakeHead, FakeRelay
 
 NF = str(Path.home() / ".local" / "bin" / "nf")
-ROOT = Path(os.environ["NF_INSTALL_ROOT"])
+ROOT = Path(os.environ.get("NF_INSTALL_ROOT")
+            or Path.home() / ".local" / "share" / "nevoflux-muse")
 CHANNEL = "chan-e2e"
 CODE = "X-ABCD-EFGH-JKMN"
 

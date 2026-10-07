@@ -126,7 +126,7 @@ async def test_ensure_needs_pairing_and_sign_in(world):
 
 async def test_a_second_foreground_bridge_refuses(world):
     await asyncio.to_thread(daemon.ensure, world.d)
-    assert await asyncio.to_thread(daemon.run_foreground, world.d) == 1
+    assert await asyncio.to_thread(daemon.run_foreground, world.d) == daemon.EXIT_ALREADY_RUNNING
 
 
 async def test_the_log_is_private_and_holds_no_secrets(world):
@@ -324,3 +324,10 @@ async def test_stop_follows_a_replacement_bridge(world, monkeypatch):
         for pid in await asyncio.to_thread(my_bridges, world.d):
             with contextlib.suppress(OSError):
                 os.kill(int(pid), signal.SIGKILL)
+
+
+async def test_ensure_detaches_when_the_user_bus_is_unreachable(world, monkeypatch):
+    monkeypatch.setattr(daemon, "run_systemctl", lambda *a: 127)
+    state.write_supervision(world.d, "systemd-user")
+    assert await asyncio.to_thread(daemon.ensure, world.d) is True
+    assert daemon.alive(world.d)

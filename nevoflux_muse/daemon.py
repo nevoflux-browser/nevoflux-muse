@@ -13,8 +13,9 @@ start) and its log to bridge.log, rotated at 1 MiB. The process runs with umask
 so nothing in the caller's working directory can shadow a module it imports.
 
 Under systemd-user supervision (`nf setup`) the unit starts the bridge; `ensure` asks
-systemd instead of detaching, and a bridge that is not ready exits 3, which the unit
-does not restart.
+systemd instead of detaching (falling back to detaching when the user bus is unreachable).
+A bridge that is not ready exits 3, and one that finds another holding the lock exits 4;
+the unit restarts on neither.
 """
 
 from __future__ import annotations
@@ -39,6 +40,7 @@ LOG_FILE = "bridge.log"
 OUT_FILE = "bridge.out"
 START_TIMEOUT = 10.0
 EXIT_NOT_READY = 3
+EXIT_ALREADY_RUNNING = 4
 UNIT_NAME = "nevoflux-muse.service"
 LOCK_RETRY = 1.0
 
@@ -107,7 +109,7 @@ Description=NevoFlux Muse bridge
 ExecStart={exec_start}
 Restart=on-failure
 RestartSec=5
-RestartPreventExitStatus={not_ready}
+RestartPreventExitStatus={not_ready} {already_running}
 {environment}
 [Install]
 WantedBy=default.target
@@ -130,7 +132,8 @@ def unit_text(d: Path) -> str:
     environment = ""
     if os.environ.get("NF_HOME"):
         environment = "Environment=" + _quote("NF_HOME=" + str(d)) + "\n"
-    return _UNIT.format(exec_start=exec_start, not_ready=EXIT_NOT_READY, environment=environment)
+    return _UNIT.format(exec_start=exec_start, not_ready=EXIT_NOT_READY,
+                        already_running=EXIT_ALREADY_RUNNING, environment=environment)
 
 
 def setup(d: Path, *, service: bool = True) -> dict:
@@ -181,9 +184,11 @@ def ensure(d: Path, timeout: float = START_TIMEOUT) -> bool:
     if running:
         stop(d)
     if state.supervision(d) == "systemd-user":
-        if run_systemctl("start", UNIT_NAME) != 0:
-            raise ipc.BridgeDown(f"systemctl --user start {UNIT_NAME} failed; "
-                                 f"see `journalctl --user -u {UNIT_NAME}`")
+        code = run_systemctl("start", UNIT_NAME)
+        if code != 0:  # no user bus (no XDG_RUNTIME_DIR, no linger): the flock keeps it to one
+            log.warning("systemctl --user start %s failed (exit %s); starting detached",
+                        UNIT_NAME, code)
+            detach(d)
     else:
         detach(d)
     deadline = time.monotonic() + timeout
@@ -314,7 +319,7 @@ def run_foreground(d: Path) -> int:
                 if time.monotonic() >= until:
                     print("nf: another bridge is already running for this state directory",
                           file=sys.stderr)
-                    return 1
+                    return EXIT_ALREADY_RUNNING
                 time.sleep(0.05)
         os.umask(0o077)  # only once we are the bridge: the refusal path leaves the caller alone
         _setup_logging(d)

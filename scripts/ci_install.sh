@@ -30,6 +30,16 @@ sh "$here/setup.sh" --no-service
 test "$(cat "$root/src_path")" = "$here"
 test -x "$root/ensure.sh"
 
+echo "== an upgrade does not package a module the new source no longer has"
+mkdir -p "$here/build/lib/nevoflux_muse"
+printf 'STALE = True
+' > "$here/build/lib/nevoflux_muse/stale_module.py"
+sh "$here/setup.sh" --no-service
+if "$root/venv/bin/python" -c 'import nevoflux_muse.stale_module' 2>/dev/null; then
+    echo "a stale module was packaged"; rm -rf "$here/build"; exit 1
+fi
+rm -rf "$here/build"
+
 echo "== the generated unit passes systemd-analyze"
 "$root/venv/bin/python" -c 'from pathlib import Path
 from nevoflux_muse import daemon
@@ -100,9 +110,12 @@ if NF_TEST_FORCE_UV=1 NF_TEST_CORRUPT_UV_DOWNLOAD=1 \
 fi
 test ! -e "$HOME/.local/share/uv/bin/uv"
 
-echo "== end to end through the installed nf"
+echo "== end to end through the installed nf, in the default root, without NF_INSTALL_ROOT"
 fresh_home home-e2e
+unset NF_INSTALL_ROOT
+root="$HOME/.local/share/nevoflux-muse"
 sh "$here/setup.sh" --no-service
+test -x "$root/venv/bin/nf"
 "$root/venv/bin/python" "$here/scripts/ci_install_e2e.py"
 pgrep -f "nevoflux_muse.cli daemon" >/dev/null && { echo "a bridge outlived uninstall"; exit 1; }
 

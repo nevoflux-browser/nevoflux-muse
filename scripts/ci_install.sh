@@ -100,4 +100,10 @@ if NF_TEST_FORCE_UV=1 NF_TEST_CORRUPT_UV_DOWNLOAD=1 \
 fi
 test ! -e "$HOME/.local/share/uv/bin/uv"
 
+echo "== end to end through the installed nf"
+fresh_home home-e2e
+sh "$here/setup.sh" --no-service
+"$root/venv/bin/python" "$here/scripts/ci_install_e2e.py"
+pgrep -f "nevoflux_muse.cli daemon" >/dev/null && { echo "a bridge outlived uninstall"; exit 1; }
+
 echo "OK"

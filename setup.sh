@@ -37,16 +37,10 @@ EOF
     exit 0
 fi
 
-waited=0
-until nf_lock; do
-    if [ "$waited" -ge 60 ]; then
-        echo "setup.sh: another setup.sh or ensure.sh is running; try again shortly" >&2
-        exit 1
-    fi
-    sleep 2
-    waited=$((waited + 2))
-done
-trap nf_unlock EXIT
+if ! nf_lock_wait; then
+    echo "setup.sh: another setup.sh or ensure.sh is running; try again shortly" >&2
+    exit 1
+fi
 : > "$NF_ROOT/pip.out"
 nf_log "setup.sh from $NF_SRC"
 

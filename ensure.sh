@@ -12,6 +12,9 @@ NF_SRC=$(cat "$root/src_path" 2>/dev/null || printf '%s' "$root/src")
 
 nf_lock || exit 0  # another setup.sh or ensure.sh is at it
 trap nf_unlock EXIT
+trap 'nf_unlock; exit 130' INT
+trap 'nf_unlock; exit 143' TERM
+trap 'nf_unlock; exit 129' HUP
 
 if ! nf_healthy; then
     nf_log "the venv does not work (did the system Python change?); rebuilding"

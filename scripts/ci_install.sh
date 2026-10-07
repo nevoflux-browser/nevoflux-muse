@@ -46,6 +46,35 @@ sh "$root/ensure.sh"
 "$root/venv/bin/python" -c 'import nevoflux_muse'
 grep -q "offline recovery" "$root/install.log"
 
+echo "== a failed refresh keeps the wheelhouse and the install"
+if PIP_INDEX_URL=http://127.0.0.1:9/simple PIP_RETRIES=0 PIP_TIMEOUT=2 \
+    sh "$here/setup.sh" --no-service; then
+    echo "setup.sh succeeded with an unreachable index"; exit 1
+fi
+ls "$root"/wheelhouse/nevoflux_muse-*.whl
+"$HOME/.local/bin/nf" version
+"$root/venv/bin/python" -c 'import nevoflux_muse'
+test ! -e "$root/venv.old"
+
+echo "== a held lock makes ensure.sh back off, and a dead holder's lock is cleared"
+sh -c 'NF_SRC=$1; . "$1/install/lib.sh"; nf_lock && sleep 8' holder "$here" &
+holder=$!
+for _ in $(seq 50); do [ -s "$root/.lock/pid" ] && break; sleep 0.1; done
+test "$(cat "$root/.lock/pid")" = "$holder"
+before=$(wc -l < "$root/install.log")
+ln -sf /nonexistent/python3 "$root/venv/bin/python"
+sh "$root/ensure.sh"
+test "$(wc -l < "$root/install.log")" = "$before"
+test "$(cat "$root/.lock/pid")" = "$holder"
+if "$root/venv/bin/python" -c 'import nevoflux_muse' 2>/dev/null; then
+    echo "ensure.sh touched the venv while the lock was held"; exit 1
+fi
+wait "$holder"
+sh "$root/ensure.sh"
+grep -q "clearing a stale lock" "$root/install.log"
+"$root/venv/bin/python" -c 'import nevoflux_muse'
+test ! -e "$root/.lock"
+
 echo "== the uv fallback"
 fresh_home home-uv
 NF_TEST_FORCE_UV=1 sh "$here/setup.sh" --no-service
@@ -54,7 +83,7 @@ assert sys.base_prefix.startswith('$HOME/.local/share/uv/python'), sys.base_pref
 
 echo "== a bad uv checksum is refused"
 fresh_home home-bad
-if NF_TEST_FORCE_UV=1 NF_TEST_UV_SHA256=$(printf '0%.0s' $(seq 64)) \
+if NF_TEST_FORCE_UV=1 NF_TEST_CORRUPT_UV_DOWNLOAD=1 \
     sh "$here/setup.sh" --no-service; then
     echo "setup.sh accepted a bad uv checksum"; exit 1
 fi

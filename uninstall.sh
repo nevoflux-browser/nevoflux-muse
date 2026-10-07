@@ -7,10 +7,17 @@ NF_SRC=$(cat "$root/src_path" 2>/dev/null || printf '%s' "$root/src")
 if [ -d "$NF_SRC" ]; then
     # shellcheck source=install/lib.sh
     . "$NF_SRC/install/lib.sh"
+    if ! nf_lock_wait; then
+        echo "uninstall.sh: another setup.sh or ensure.sh is running; try again shortly" >&2
+        exit 1
+    fi
     if ! nf_healthy && py=$(nf_python); then
         : > "$NF_ROOT/pip.out"
         nf_build_venv "$py" 0 || true
     fi
+    # exec replaces the shell, so release the lock first.
+    nf_unlock
+    trap - EXIT INT TERM HUP
 fi
 if [ -x "$root/venv/bin/nf" ]; then
     exec "$root/venv/bin/nf" uninstall "$@"

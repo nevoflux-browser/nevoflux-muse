@@ -33,6 +33,7 @@ nf_boot_id() {
 # where there is no boot id to tell, once it is ten minutes old. A stale lock is cleared by
 # an atomic rename, which only one contender wins.
 # On failure NF_LOCK_HOLDER names the holder.
+# shellcheck disable=SC2034 # NF_LOCK_HOLDER is read by ensure.sh
 nf_lock() {
     NF_LOCK_HOLDER=
     mkdir -p "$NF_ROOT" || return 1

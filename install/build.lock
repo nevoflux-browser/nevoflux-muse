@@ -1,0 +1,6 @@
+# The build backend for the project wheel (pyproject's build-system asks for setuptools>=77),
+# pinned and hashed so setup.sh never runs an unpinned download as the installing user.
+# To update: pick a release, then take the sha256 of its py3-none-any wheel from
+#   https://pypi.org/pypi/setuptools/<version>/json
+setuptools==80.9.0 \
+    --hash=sha256:062d34222ad13e0cc312a4c02d73f059e86a4acbfbdea8f8f76b28c99f306922

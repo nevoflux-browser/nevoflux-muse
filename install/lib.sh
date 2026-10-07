@@ -21,30 +21,70 @@ nf_log() {
     printf '%s\n' "$nf_line" >&2
 }
 
-# A mkdir lock: atomic everywhere, unlike flock. A holder that died, or one older than
-# ten minutes, is stale.
+# A mkdir lock: atomic everywhere, unlike flock. The holder's pid is published by an atomic
+# mv, so a contender never sees a half-made lock; a lock with no pid yet is held until it
+# is a minute old. A live holder is never robbed. A dead holder's lock is cleared by an
+# atomic rename, which only one contender wins.
 nf_lock() {
-    mkdir -p "$NF_ROOT"
-    if mkdir "$NF_ROOT/.lock" 2>/dev/null; then
-        printf '%s\n' "$$" > "$NF_ROOT/.lock/pid"
-        return 0
-    fi
-    nf_old=$(cat "$NF_ROOT/.lock/pid" 2>/dev/null || true)
-    if [ -n "$nf_old" ] && kill -0 "$nf_old" 2>/dev/null \
-        && [ -z "$(find "$NF_ROOT/.lock" -maxdepth 0 -mmin +10 2>/dev/null)" ]; then
-        return 1
-    fi
-    nf_log "clearing a stale lock (pid ${nf_old:-unknown})"
-    rm -rf "$NF_ROOT/.lock"
-    if mkdir "$NF_ROOT/.lock" 2>/dev/null; then
-        printf '%s\n' "$$" > "$NF_ROOT/.lock/pid"
-        return 0
-    fi
+    mkdir -p "$NF_ROOT" || return 1
+    nf_try=0
+    while [ "$nf_try" -lt 3 ]; do
+        nf_try=$((nf_try + 1))
+        if mkdir "$NF_ROOT/.lock" 2>/dev/null; then
+            if printf '%s\n' "$$" > "$NF_ROOT/.lock/pid.tmp" \
+                && mv "$NF_ROOT/.lock/pid.tmp" "$NF_ROOT/.lock/pid"; then
+                return 0
+            fi
+            rm -rf "$NF_ROOT/.lock"
+            return 1
+        fi
+        [ -d "$NF_ROOT/.lock" ] || continue
+        nf_old=$(cat "$NF_ROOT/.lock/pid" 2>/dev/null || true)
+        if [ -n "$nf_old" ]; then
+            if kill -0 "$nf_old" 2>/dev/null; then
+                return 1
+            fi
+        elif [ -z "$(find "$NF_ROOT/.lock" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
+            return 1
+        fi
+        nf_stale="$NF_ROOT/.lock.stale.$$"
+        rm -rf "$nf_stale"
+        if mv "$NF_ROOT/.lock" "$nf_stale" 2>/dev/null; then
+            nf_seen=$(cat "$nf_stale/pid" 2>/dev/null || true)
+            if [ "$nf_seen" != "$nf_old" ]; then
+                # Someone else's fresh lock: put it back.
+                mv "$nf_stale" "$NF_ROOT/.lock" 2>/dev/null || rm -rf "$nf_stale"
+                return 1
+            fi
+            nf_log "clearing a stale lock (pid ${nf_old:-unknown})"
+            rm -rf "$nf_stale"
+        fi
+    done
     return 1
 }
 
+# Releases the lock only if this process holds it.
 nf_unlock() {
-    rm -rf "$NF_ROOT/.lock"
+    if [ "$(cat "$NF_ROOT/.lock/pid" 2>/dev/null || true)" = "$$" ]; then
+        rm -rf "$NF_ROOT/.lock"
+    fi
+    return 0
+}
+
+# Waits up to a minute for the lock; on success releases it on exit and on signals.
+nf_lock_wait() {
+    nf_waited=0
+    until nf_lock; do
+        if [ "$nf_waited" -ge 60 ]; then
+            return 1
+        fi
+        sleep 2
+        nf_waited=$((nf_waited + 2))
+    done
+    trap nf_unlock EXIT
+    trap 'nf_unlock; exit 130' INT
+    trap 'nf_unlock; exit 143' TERM
+    trap 'nf_unlock; exit 129' HUP
 }
 
 nf_find_python() {
@@ -90,14 +130,13 @@ nf_uv_python() {
         aarch64 | arm64) nf_arch=aarch64; nf_sum=$NF_UV_SHA256_AARCH64 ;;
         *) nf_log "no pinned uv build for $(uname -m)"; return 1 ;;
     esac
-    nf_sum="${NF_TEST_UV_SHA256:-$nf_sum}"
     nf_uv="$NF_UV_DIR/bin/uv"
     if [ ! -x "$nf_uv" ] \
         || [ "$("$nf_uv" --version 2>/dev/null | cut -d ' ' -f 2)" != "$NF_UV_VERSION" ]; then
         nf_name="uv-$nf_arch-unknown-linux-musl"
         nf_tmp="$NF_UV_DIR/tmp"
         rm -rf "$nf_tmp"
-        mkdir -p "$nf_tmp" "$NF_UV_DIR/bin"
+        mkdir -p "$nf_tmp" "$NF_UV_DIR/bin" || return 1
         nf_log "downloading uv $NF_UV_VERSION ($nf_arch)"
         if ! nf_fetch \
             "https://github.com/astral-sh/uv/releases/download/$NF_UV_VERSION/$nf_name.tar.gz" \
@@ -105,15 +144,22 @@ nf_uv_python() {
             rm -rf "$nf_tmp"
             return 1
         fi
+        if [ "${NF_TEST_CORRUPT_UV_DOWNLOAD:-}" = 1 ]; then
+            printf 'x' >> "$nf_tmp/$nf_name.tar.gz"  # test hook: can only make the check fail
+        fi
         nf_got=$(nf_sha256 "$nf_tmp/$nf_name.tar.gz")
         if [ "$nf_got" != "$nf_sum" ]; then
             nf_log "the uv download failed its checksum (got $nf_got); refusing to use it"
             rm -rf "$nf_tmp"
             return 1
         fi
-        tar -xzf "$nf_tmp/$nf_name.tar.gz" -C "$nf_tmp"
-        mv "$nf_tmp/$nf_name/uv" "$nf_uv"
-        chmod 0755 "$nf_uv"
+        if ! tar -xzf "$nf_tmp/$nf_name.tar.gz" -C "$nf_tmp" \
+            || ! mv "$nf_tmp/$nf_name/uv" "$nf_uv" \
+            || ! chmod 0755 "$nf_uv"; then
+            nf_log "could not unpack uv"
+            rm -rf "$nf_tmp"
+            return 1
+        fi
         rm -rf "$nf_tmp"
     fi
     UV_PYTHON_INSTALL_DIR="$NF_UV_DIR/python" "$nf_uv" python install "$NF_UV_PYTHON" >&2 \
@@ -135,16 +181,29 @@ nf_python() {
 }
 
 # Every dependency wheel the lock names, plus a wheel of this project: a heal can then
-# reinstall without the network (and without a build backend).
+# reinstall without the network. The build backend comes from install/build.lock (hashed),
+# not from an unpinned download. The project wheel is built aside and only swapped in once
+# everything succeeded, so a failed refresh never leaves the wheelhouse without one.
+# $1: the new venv.
 nf_refresh_wheelhouse() {
+    nf_rv="$1"
     nf_wh="$NF_ROOT/wheelhouse"
-    mkdir -p "$nf_wh"
-    rm -f "$nf_wh"/nevoflux_muse-*.whl
-    "$1/bin/python" -m pip download --disable-pip-version-check --require-hashes \
+    nf_proj="$NF_ROOT/wheelhouse.new-proj"
+    mkdir -p "$nf_wh" || return 1
+    rm -rf "$nf_proj"
+    mkdir -p "$nf_proj" || return 1
+    "$nf_rv/bin/python" -m pip install --disable-pip-version-check --require-hashes \
+        -r "$NF_SRC/install/build.lock" >> "$NF_ROOT/pip.out" 2>&1 || return 1
+    "$nf_rv/bin/python" -m pip download --disable-pip-version-check --require-hashes \
         --only-binary=:all: -r "$NF_SRC/requirements.lock" -d "$nf_wh" \
         >> "$NF_ROOT/pip.out" 2>&1 || return 1
-    "$1/bin/python" -m pip wheel --disable-pip-version-check --no-deps "$NF_SRC" -w "$nf_wh" \
-        >> "$NF_ROOT/pip.out" 2>&1 || return 1
+    "$nf_rv/bin/python" -m pip wheel --disable-pip-version-check --no-build-isolation \
+        --no-deps "$NF_SRC" -w "$nf_proj" >> "$NF_ROOT/pip.out" 2>&1 || return 1
+    set -- "$nf_proj"/nevoflux_muse-*.whl
+    [ -e "$1" ] || return 1
+    rm -f "$nf_wh"/nevoflux_muse-*.whl || return 1
+    mv "$1" "$nf_wh"/ || return 1
+    rm -rf "$nf_proj"
     for nf_whl in "$nf_wh"/*.whl; do
         [ -e "$nf_whl" ] || continue
         nf_base=$(basename "$nf_whl")
@@ -171,8 +230,15 @@ nf_install_deps() {
             --find-links "$NF_ROOT/wheelhouse" -r "$NF_SRC/requirements.lock" \
             >> "$NF_ROOT/pip.out" 2>&1 || return 1
     fi
-    "$nf_vpy" -m pip install --disable-pip-version-check --no-deps --no-index \
-        --find-links "$NF_ROOT/wheelhouse" nevoflux-muse >> "$NF_ROOT/pip.out" 2>&1
+    set -- "$NF_ROOT"/wheelhouse/nevoflux_muse-*.whl
+    if [ -e "$1" ]; then
+        "$nf_vpy" -m pip install --disable-pip-version-check --no-deps --no-index \
+            --find-links "$NF_ROOT/wheelhouse" nevoflux-muse >> "$NF_ROOT/pip.out" 2>&1
+    else
+        nf_log "no project wheel in the wheelhouse; installing from $NF_SRC"
+        "$nf_vpy" -m pip install --disable-pip-version-check --no-deps "$NF_SRC" \
+            >> "$NF_ROOT/pip.out" 2>&1
+    fi
 }
 
 # Builds the venv in place (console scripts hard-code its path, so it cannot be moved),
@@ -181,9 +247,9 @@ nf_install_deps() {
 nf_build_venv() {
     nf_v="$NF_ROOT/venv"
     nf_old="$NF_ROOT/venv.old"
-    rm -rf "$nf_old"
+    rm -rf "$nf_old" || return 1
     if [ -e "$nf_v" ]; then
-        mv "$nf_v" "$nf_old"
+        mv "$nf_v" "$nf_old" || return 1
     fi
     if "$1" -m venv "$nf_v" >> "$NF_ROOT/pip.out" 2>&1 \
         && { [ "$2" != 1 ] || nf_refresh_wheelhouse "$nf_v"; } \
@@ -191,9 +257,9 @@ nf_build_venv() {
         rm -rf "$nf_old"
         return 0
     fi
-    rm -rf "$nf_v"
+    rm -rf "$nf_v" || return 1
     if [ -e "$nf_old" ]; then
-        mv "$nf_old" "$nf_v"
+        mv "$nf_old" "$nf_v" || return 1
     fi
     return 1
 }

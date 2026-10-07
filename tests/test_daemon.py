@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import contextlib
 import os
 import signal
 import socket
@@ -282,7 +283,8 @@ async def test_lock_retry_absorbs_a_brief_holder(world):
     state.ensure_dir(world.d)
     fd = os.open(world.d / daemon.LOCK_FILE, os.O_RDWR | os.O_CREAT, 0o600)
     fcntl.flock(fd, fcntl.LOCK_EX)
-    threading.Timer(0.2, os.close, [fd]).start()  # held for 0.2 s, like a _still_running probe
+    # held past a detached interpreter's start-up, but under LOCK_RETRY
+    threading.Timer(0.6, os.close, [fd]).start()
     assert await asyncio.to_thread(daemon.ensure, world.d) is True
 
 
@@ -290,17 +292,35 @@ async def test_stop_follows_a_replacement_bridge(world, monkeypatch):
     await asyncio.to_thread(daemon.ensure, world.d)
     first = daemon.alive(world.d)["pid"]
     real_request = ipc.request
-    intercepted = []
+    shutdowns = []
 
     def swallow_shutdown(d, msg, timeout):
-        if msg.get("op") == "shutdown" and not intercepted:  # the first bridge ignores it...
-            intercepted.append(1)
-            os.kill(first, signal.SIGKILL)  # ...dies, and a parallel ensure starts another
-            daemon.detach(d)
-            return {"ok": True}
+        if msg.get("op") == "shutdown":
+            shutdowns.append(1)
+            if len(shutdowns) == 1:  # the first bridge ignores it...
+                os.kill(first, signal.SIGKILL)  # ...dies, and a parallel ensure starts another
+                daemon.detach(d)
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline:  # stop must meet the replacement
+                    try:
+                        reply = real_request(d, {"op": "ping"}, 2.0)
+                    except ipc.BridgeDown:
+                        reply = {}
+                    if reply.get("ok") and reply.get("pid") != first:
+                        break
+                    time.sleep(0.05)
+                return {"ok": True}
         return real_request(d, msg, timeout)
 
     monkeypatch.setattr(ipc, "request", swallow_shutdown)
-    assert await asyncio.to_thread(daemon.stop, world.d, 1.0) is True
-    monkeypatch.setattr(ipc, "request", real_request)
-    assert daemon.alive(world.d) is None
+    try:
+        assert await asyncio.to_thread(daemon.stop, world.d, 1.0) is True
+        monkeypatch.setattr(ipc, "request", real_request)
+        assert len(shutdowns) == 2  # the replacement got its own shutdown
+        assert daemon.alive(world.d) is None
+        assert await asyncio.to_thread(my_bridges, world.d) == []
+    finally:
+        monkeypatch.setattr(ipc, "request", real_request)
+        for pid in await asyncio.to_thread(my_bridges, world.d):
+            with contextlib.suppress(OSError):
+                os.kill(int(pid), signal.SIGKILL)

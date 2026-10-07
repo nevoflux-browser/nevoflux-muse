@@ -318,7 +318,7 @@ async def test_stop_follows_a_replacement_bridge(world, monkeypatch):
         monkeypatch.setattr(ipc, "request", real_request)
         assert len(shutdowns) == 2  # the replacement got its own shutdown
         assert daemon.alive(world.d) is None
-        assert await asyncio.to_thread(my_bridges, world.d) == []
+        assert await until_gone(world.d) == []
     finally:
         monkeypatch.setattr(ipc, "request", real_request)
         for pid in await asyncio.to_thread(my_bridges, world.d):

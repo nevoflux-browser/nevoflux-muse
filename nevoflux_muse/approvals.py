@@ -76,6 +76,12 @@ class Deadline:
             if self._timer is not None:
                 self._arm()
 
+    def restart(self) -> None:
+        """Give the watched task its whole `seconds` again, from now: earlier or later."""
+        self._at = self._loop.time() + self.seconds
+        if self._timer is not None:
+            self._arm()
+
     def stop(self) -> None:
         if self._timer is not None:
             self._timer.cancel()
@@ -194,6 +200,11 @@ class Approvals:
         approval.answer.set_result(
             types.ElicitResult(action="accept", content={"approve": True}) if approve is True
             else types.ElicitResult(action="decline"))
+        call = approval.call
+        if call is not None and call.deadline is not None:
+            # The question postponed the deadline by hold + timeout; once answered the call
+            # gets its own timeout again, from now, not whatever is left of the hold.
+            call.deadline.restart()
         return approval
 
     def pending(self) -> list[dict]:

@@ -2,8 +2,11 @@
 
 One request per connection: the client writes one JSON object and a newline,
 the bridge answers with one JSON object and a newline and closes. Replies are
-{"ok": true, ...} or {"ok": false, "error": {"code", "message", ...}}. Lines
-may be large (screenshots travel as base64), up to MAX_LINE.
+{"ok": true, ...} or {"ok": false, "error": {"code", "message", ...}}. A call
+may also answer {"ok": true, "approval_required": {"id", "message",
+"expires_in"}}; approve/deny without a running call answer {"ok": true,
+"answered": "approved" | "denied"}. Lines may be large (screenshots travel as
+base64), up to MAX_LINE.
 """
 
 from __future__ import annotations

@@ -7,8 +7,12 @@ touches a socket, so it is tested on every platform; serve() is the thin
 AF_UNIX layer around it.
 
 At most max_in_flight calls run at once (the head buffers 32 messages per
-session); waiting for a slot counts toward the call's timeout. The log names
-the tool, the outcome and the time taken, never arguments or results.
+session); waiting for a slot counts toward the call's timeout. A call runs as
+its own task: when the head asks for an approval (approvals.py) `call`
+returns approval_required at once and the call keeps waiting, with its slot,
+until `approve` or `deny` answers; the approval wait does not count toward its
+timeout. The log names the tool, the outcome and the time taken, never
+arguments, results or approval messages.
 """
 
 from __future__ import annotations
@@ -26,6 +30,7 @@ from mcp import MCPError
 from mcp_types import CONNECTION_CLOSED
 
 from . import __version__, auth, ipc, pairing, state
+from .approvals import APPROVAL_HOLD, APPROVAL_WINDOW, CALL_META, Approvals, Call, Deadline
 from .session import HeadConnection
 
 log = logging.getLogger(__name__)
@@ -54,12 +59,15 @@ class Bridge:
     def __init__(self, d: Path, *,
                  connection_factory: Callable[[], HeadConnection | None] | None = None,
                  max_in_flight: int = ipc.MAX_IN_FLIGHT, connect_wait: float = ipc.CONNECT_WAIT,
-                 call_timeout: float = ipc.CALL_TIMEOUT):
+                 call_timeout: float = ipc.CALL_TIMEOUT,
+                 approval_window: float = APPROVAL_WINDOW, approval_hold: float = APPROVAL_HOLD):
         self.d = d
         self._factory = connection_factory or self._connection_from_files
         self._connect_wait = connect_wait
         self._call_timeout = call_timeout
         self._slots = asyncio.Semaphore(max_in_flight)
+        self.approvals = Approvals(window=approval_window, hold=approval_hold)
+        self._running: set[asyncio.Task] = set()  # call tasks, taken down by stop and reload
         self._conn: HeadConnection | None = None
         self._load_error: str | None = None
         self._since = _now()
@@ -91,6 +99,7 @@ class Bridge:
             conn, self._load_error = None, f"unexpected {type(e).__name__}"
             log.error("loading the connection failed: %s", type(e).__name__)
         if conn is not None:
+            conn.elicitation_callback = self.approvals.elicit
             await conn.__aenter__()
         self._conn = conn
         self._since = _now()
@@ -101,6 +110,12 @@ class Bridge:
             await self._stop()
 
     async def _stop(self) -> None:
+        # Take down every call this connection started, waiting for an approval or not:
+        # none outlives it in the background (their callers get connection_lost).
+        running = list(self._running)
+        for task in running:
+            task.cancel()
+        await asyncio.gather(*running, return_exceptions=True)
         conn, self._conn = self._conn, None
         if conn is not None:
             await conn.__aexit__(None, None, None)
@@ -141,6 +156,12 @@ class Bridge:
                 return await self._tools(msg)
             if op == "call":
                 return await self._call(msg)
+            if op == "approve":
+                return await self._answer(msg, approve=True)
+            if op == "deny":
+                return await self._answer(msg, approve=False)
+            if op == "pending":
+                return {"ok": True, "pending": self.approvals.pending()}
             if op == "reload":
                 await self.reload()
                 return {"ok": True}
@@ -165,7 +186,7 @@ class Bridge:
             raise _Fail("not_connected", self.status()["last_error"] or conn.state,
                         state=conn.state) from None
 
-    async def _guarded(self, label: str, timeout: float, make: Callable[[], Awaitable]):
+    async def _guarded(self, label: str, deadline: Deadline, make: Callable[[], Awaitable]):
         started = time.monotonic()
         outcome = "ok"
 
@@ -173,11 +194,18 @@ class Bridge:
             async with self._slots:
                 return await make()
 
+        inner = asyncio.ensure_future(run())
+        deadline.watch(inner)
         try:
-            return await asyncio.wait_for(run(), timeout)
-        except asyncio.TimeoutError:
+            return await inner
+        except asyncio.CancelledError:
+            if not deadline.expired:  # our caller was cancelled: take the call down too
+                inner.cancel()
+                outcome = "cancelled"
+                raise
             outcome = "timeout"
-            raise _Fail("timeout", f"{label} did not finish within {timeout:g}s") from None
+            raise _Fail("timeout",
+                        f"{label} did not finish within {deadline.seconds:g}s") from None
         except MCPError as e:
             if e.code == CONNECTION_CLOSED:
                 outcome = "connection_lost"
@@ -192,11 +220,12 @@ class Bridge:
             outcome = "internal"
             raise _Fail("internal", f"unexpected {type(e).__name__}") from None
         finally:
+            deadline.stop()
             log.info("%s -> %s in %.2fs", label, outcome, time.monotonic() - started)
 
     async def _tools(self, msg: dict) -> dict:
         s = await self._session(msg)
-        result = await self._guarded("tools/list", self._call_timeout, s.list_tools)
+        result = await self._guarded("tools/list", Deadline(self._call_timeout), s.list_tools)
         return {"ok": True, "tools": [
             {"name": t.name, "description": t.description, "inputSchema": t.input_schema}
             for t in result.tools]}
@@ -207,13 +236,73 @@ class Bridge:
             raise _Fail("bad_request", "call needs a tool name and an args object")
         timeout = _seconds(msg, "timeout", self._call_timeout)
         s = await self._session(msg)
-        result = await self._guarded(f"call {tool!r}", timeout, lambda: s.call_tool(tool, args))
-        try:
-            dumped = result.model_dump(mode="json", by_alias=True, exclude_none=True)
-        except Exception as e:  # noqa: BLE001 - name the type only
-            raise _Fail("internal", f"unexpected {type(e).__name__}") from None
-        return {"ok": True, "result": dumped}
+        call = self.approvals.open_call(tool)
+        call.deadline = Deadline(timeout)
+        call.task = asyncio.create_task(self._run_call(call, s, args))
+        self._running.add(call.task)
 
+        def done(task: asyncio.Task) -> None:
+            self._running.discard(task)
+            self.approvals.close_call(call)
+
+        call.task.add_done_callback(done)
+        return await self._follow(call)
+
+    async def _run_call(self, call: Call, s, args: dict) -> dict:
+        try:
+            result = await self._guarded(
+                f"call {call.tool!r}", call.deadline,
+                lambda: s.call_tool(call.tool, args, meta={CALL_META: call.id}))
+            try:
+                dumped = result.model_dump(mode="json", by_alias=True, exclude_none=True)
+            except Exception as e:  # noqa: BLE001 - name the type only
+                raise _Fail("internal", f"unexpected {type(e).__name__}") from None
+            return {"ok": True, "result": dumped}
+        except _Fail as f:
+            return f.reply
+
+    async def _follow(self, call: Call, wait: float | None = None) -> dict:
+        """The call's reply, or approval_required as soon as the head asks about it."""
+        loop = asyncio.get_running_loop()
+        until = None if wait is None else loop.time() + wait
+        while True:
+            asked = asyncio.ensure_future(call.asked.wait())
+            try:
+                left = None if until is None else max(0.0, until - loop.time())
+                await asyncio.wait({call.task, asked}, timeout=left,
+                                   return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                asked.cancel()
+            if call.task.done():
+                if call.task.cancelled():  # stop or reload took it down
+                    raise _Fail("connection_lost",
+                                "the bridge stopped or reloaded before the answer came")
+                return call.task.result()
+            if call.asked.is_set():
+                call.asked.clear()
+                approval = call.approval
+                # An answered question is not news: a question asked while nobody followed
+                # the call leaves the flag set, and its answer is what brought us here.
+                if approval is not None and not approval.answer.done():
+                    return {"ok": True,
+                            "approval_required": approval.public(self.approvals.now())}
+                continue  # answered meanwhile: keep waiting for the result
+            raise _Fail("timeout", f"call {call.tool!r} did not finish within {wait:g}s "
+                                   "of the answer")
+
+    async def _answer(self, msg: dict, approve: bool) -> dict:
+        approval_id = msg.get("id")
+        if not isinstance(approval_id, str) or not approval_id:
+            raise _Fail("bad_request", "approve and deny need the approval id")
+        wait = _seconds(msg, "timeout", self._call_timeout)
+        approval = self.approvals.answer(approval_id, approve)
+        if approval is None:
+            raise _Fail("approval_expired", "that approval is no longer open: it expired, was "
+                                            "already answered, or the bridge restarted")
+        call = approval.call
+        if call is None or call.task is None:
+            return {"ok": True, "answered": "approved" if approve else "denied"}
+        return await self._follow(call, wait)
 
 async def serve(bridge: Bridge, path: Path):
     async def on_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:

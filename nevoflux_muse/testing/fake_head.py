@@ -14,9 +14,12 @@ Mirrors the head (protocol §4-§5, and the stub head's tool table):
   - M2a: tools in `ask` need an approval: the head sends a form elicitation
     (APPROVAL_SCHEMA) and runs the tool only on accept + approve=true; a client
     without the elicitation capability gets approval_denied
-    (client_cannot_approve); no answer within approval_timeout sends
-    notifications/cancelled and approval_timeout. Tools in `errors` return that
-    structured tool error (tool_error()). Like the real head, every elicitation
+    (client_cannot_approve), a JSON-RPC error reply gets approval_denied
+    (approval_failed); no answer within approval_timeout sends
+    notifications/cancelled and approval_timeout. Its request ids are integers
+    from 0 and its message is multi-line (ask_message()), as the real head's.
+    Tools in `errors` return that structured tool error (tool_error()). Like
+    the real head, every elicitation
     carries _meta.progressToken equal to its request id, and (echo_call_meta, on
     by default) copies the call's _meta["io.nevoflux/call"].
 
@@ -38,6 +41,7 @@ import os
 
 import websockets
 
+from ..approvals import APPROVAL_SCHEMA, CALL_META
 from ..transport import Peers, RelayLink
 
 WHITELIST = (
@@ -46,10 +50,11 @@ WHITELIST = (
     "browser_type_by_id", "browser_click", "browser_fill", "browser_type", "browser_key_press",
     "browser_scroll", "browser_wait_for", "browser_upload_file",
 )
-# Task 3 moves these two into approvals.py.
-APPROVAL_SCHEMA = {"type": "object", "properties": {"approve": {"type": "boolean"}},
-                   "required": ["approve"]}
-CALL_META = "io.nevoflux/call"
+
+
+def ask_message(name: str) -> str:
+    """The approval question, multi-line like the real head's: action, tab, reason."""
+    return f"Run {name}\nTab: tab 1\nWhy: test asks"
 
 
 def tool_error(code: str, message: str, **extra) -> dict:
@@ -85,7 +90,7 @@ class FakeHead:
         self._task: asyncio.Task | None = None
         self._send_lock = asyncio.Lock()
         self._asked = 0
-        self._waiting: dict[str, asyncio.Future] = {}
+        self._waiting: dict[int, asyncio.Future] = {}
         self._jobs: set[asyncio.Task] = set()
 
     async def start(self) -> FakeHead:
@@ -163,7 +168,8 @@ class FakeHead:
     async def _handle(self, m: dict) -> None:
         self.requests.append(m)
         method, mid = m.get("method"), m.get("id")
-        if method is None and isinstance(mid, str) and mid in self._waiting:
+        if (method is None and isinstance(mid, int) and not isinstance(mid, bool)
+                and mid in self._waiting):
             waiting = self._waiting.pop(mid)
             if not waiting.done():
                 waiting.set_result(m)
@@ -219,8 +225,8 @@ class FakeHead:
             result = tool_error("approval_denied", "the client cannot ask for approval",
                                 reason="client_cannot_approve")
         else:
+            eid = self._asked  # an integer from 0, like the real head's request ids
             self._asked += 1
-            eid = f"e{self._asked}"
             waiting = asyncio.get_running_loop().create_future()
             self._waiting[eid] = waiting
             meta: dict = {"progressToken": eid}
@@ -228,7 +234,7 @@ class FakeHead:
             if self.echo_call_meta and call is not None:
                 meta[CALL_META] = call
             await self._send({"jsonrpc": "2.0", "id": eid, "method": "elicitation/create",
-                              "params": {"mode": "form", "message": f"Allow {name}?",
+                              "params": {"mode": "form", "message": ask_message(name),
                                          "requestedSchema": APPROVAL_SCHEMA, "_meta": meta}})
             try:
                 reply = await asyncio.wait_for(waiting, self.approval_timeout)
@@ -240,7 +246,11 @@ class FakeHead:
             else:
                 self.answers.append(reply)
                 answer = reply.get("result") or {}
-                if (answer.get("action") == "accept"
+                if "error" in reply:
+                    result = tool_error("approval_denied",
+                                        f"the approval request for {name} failed",
+                                        reason="approval_failed")
+                elif (answer.get("action") == "accept"
                         and (answer.get("content") or {}).get("approve") is True):
                     result = {"content": [{"type": "text", "text": f"fake {name}"}]}
                 else:

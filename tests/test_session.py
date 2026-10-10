@@ -8,6 +8,7 @@ from mcp.shared.message import SessionMessage
 from mcp_types import CONNECTION_CLOSED, jsonrpc_message_adapter
 
 from nevoflux_muse import session as session_mod
+from nevoflux_muse.approvals import APPROVAL_SCHEMA
 from nevoflux_muse.auth import AuthRevoked
 from nevoflux_muse.envelope import Envelope
 from nevoflux_muse.pairing import Pairing
@@ -18,7 +19,6 @@ from nevoflux_muse.session import (
     RelayRejected,
 )
 from nevoflux_muse.testing import FakeHead, FakeRelay
-from nevoflux_muse.testing.fake_head import APPROVAL_SCHEMA
 from nevoflux_muse.transport import RelayLink, RelayRefused
 
 KEY = bytes(range(32))
@@ -449,10 +449,11 @@ async def test_fake_head_asks_and_honours_the_answer(relay):
             assert denied.is_error is True
             assert denied.structured_content["error"]["code"] == "approval_denied"
             assert denied.structured_content["error"]["reason"] == "declined"
-        assert seen[0].message == "Allow browser_click?"
+        assert seen[0].message == "Run browser_click\nTab: tab 1\nWhy: test asks"
         assert seen[0].requested_schema == APPROVAL_SCHEMA
         assert [a["result"]["action"] for a in head.answers] == ["accept", "decline"]
         asks = [m for m in head.sent if m.get("method") == "elicitation/create"]
+        assert [a["id"] for a in asks] == [0, 1]  # integers from 0, like the real head
         assert all(a["params"]["_meta"]["progressToken"] == a["id"] for a in asks)
     finally:
         await head.stop()
@@ -473,6 +474,25 @@ async def test_fake_head_refuses_a_client_that_cannot_approve(relay):
         await head.stop()
 
 
+async def test_fake_head_treats_an_error_reply_as_a_failed_approval(relay):
+    head = await FakeHead(relay.url, CHANNEL, KEY, tools=("browser_click",),
+                          ask=("browser_click",)).start()
+
+    async def fail(context, params):
+        return types.ErrorData(code=types.INTERNAL_ERROR, message="cannot ask")
+
+    try:
+        async with _asking_connection(relay, fail) as conn:
+            s = await conn.session(timeout=5)
+            r = await asyncio.wait_for(s.call_tool("browser_click", {}), 5)
+        err = r.structured_content["error"]
+        assert r.is_error and err["code"] == "approval_denied"
+        assert err["reason"] == "approval_failed"
+        assert "error" in head.answers[0]
+    finally:
+        await head.stop()
+
+
 async def test_fake_head_times_out_and_cancels_its_question(relay):
     head = await FakeHead(relay.url, CHANNEL, KEY, tools=("browser_click",),
                           ask=("browser_click",), approval_timeout=0.3).start()
@@ -485,7 +505,8 @@ async def test_fake_head_times_out_and_cancels_its_question(relay):
             s = await conn.session(timeout=5)
             r = await asyncio.wait_for(s.call_tool("browser_click", {}), 5)
         assert r.is_error and r.structured_content["error"]["code"] == "approval_timeout"
-        assert any(m.get("method") == "notifications/cancelled" for m in head.sent)
+        [cancelled] = [m for m in head.sent if m.get("method") == "notifications/cancelled"]
+        assert cancelled["params"]["requestId"] == 0
     finally:
         await head.stop()
 

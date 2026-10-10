@@ -21,7 +21,7 @@ def box(tmp_path, monkeypatch, account):
     monkeypatch.setattr(daemon, "SUPPORTED", False)  # held() is a no-op off POSIX
     (root / "venv" / "bin").mkdir(parents=True)
     (root / "venv" / "bin" / "nf").write_text("")
-    (root / "installed_tag").write_text("v0.2.0\n")
+    (root / "installed_tag").write_text("v0.3.0\n")
     account.valid.add("tok-1")
     state.write_secret(d, state.ACCOUNT_FILE, {"base_url": account.url, "access_token": "tok-1"})
     state.write_secret(d, state.PAIRING_FILE, {"relay": "wss://r", "channel": "c", "key": "AA=="})

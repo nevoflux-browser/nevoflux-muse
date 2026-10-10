@@ -6,9 +6,10 @@ The client an AI agent runs (in its own VM) to drive a NevoFlux browser it has
 been paired with. The protocol is documented in the head's repository:
 [`docs/muse-client-protocol.md`](https://github.com/nevoflux-browser/nevoflux-agent/blob/main/docs/muse-client-protocol.md).
 
-Status: protocol core, resident bridge and installer. `nf pair`, `nf auth begin`,
-`nf status`, `nf tools`, `nf call`, `nf ensure`, `nf daemon`, `nf setup`, `nf unpair`,
-`nf reset`, `nf uninstall` and `nf version` work.
+Status: protocol core, resident bridge, installer and approvals. `nf pair`,
+`nf auth begin`, `nf status`, `nf tools`, `nf call`, `nf approve`, `nf deny`, `nf pending`,
+`nf ensure`, `nf daemon`, `nf setup`, `nf unpair`, `nf reset`, `nf uninstall` and
+`nf version` work.
 
 ## Install
 
@@ -16,7 +17,7 @@ On a Linux VM, an agent installs the client by following [`INSTALL.md`](INSTALL.
 which gives every step, its expected output and what to tell the person. In short:
 
 ```sh
-git clone --depth 1 -b v0.2.0 https://github.com/nevoflux-browser/nevoflux-muse ~/.local/share/nevoflux-muse/src
+git clone --depth 1 -b v0.3.0 https://github.com/nevoflux-browser/nevoflux-muse ~/.local/share/nevoflux-muse/src
 ~/.local/share/nevoflux-muse/src/setup.sh
 ```
 
@@ -45,11 +46,24 @@ printf '%s' '{"text": "..."}' | nf call browser_type --args-stdin
 nf ensure                          # start the bridge if it is not running (watchdogs)
 ```
 
+When NevoFlux wants an approval first, `nf call` exits 3 with
+`{"approval_required": {"id", "message", "expires_in"}}` and the call waits:
+
+```sh
+nf approve <id>                    # run it and print its result, as nf call would
+nf deny <id>                       # refuse it (exit 1, approval_denied)
+nf pending                         # the questions still open
+```
+
+Refusals and browser failures exit 1 with `{"error": "<code>", "message": ...}`; the codes
+are listed in [`INSTALL.md`](INSTALL.md#when-a-call-fails).
+
 `nf setup` chooses how the bridge is kept running (`setup.sh` runs it); `nf uninstall`
 revokes the sign-in, stops the bridge and removes the installation.
 
-The bridge needs Linux or macOS. On Windows `nf daemon`, `ensure`, `tools`, `call` and
-`setup` exit 1 with "unsupported on Windows", and `nf status` stops at `ready`.
+The bridge needs Linux or macOS. On Windows `nf daemon`, `ensure`, `tools`, `call`,
+`approve`, `deny`, `pending` and `setup` exit 1 with "unsupported on Windows", and
+`nf status` stops at `ready`.
 
 The bridge logs to `bridge.log` in the state directory (tool names, outcomes and timings;
 never arguments or results).

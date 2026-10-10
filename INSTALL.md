@@ -8,7 +8,9 @@ and where the person must be told something ("Tell the person: ...").
 Conventions:
 
 - Every `nf` command takes `--json`. Use it and read the fields named below.
-- Exit code 0 is success, 1 is failure, 2 is a usage error.
+- Exit code 0 is success, 1 is failure, 2 is a usage error, and 3 means NevoFlux asks for an
+  approval before it runs a call (only `nf call` and `nf approve` return it): see "Handling
+  approvals (exit code 3)".
 - `nf` is at `~/.local/bin/nf`. Use that full path if `~/.local/bin` is not on `PATH`.
 - Never put a secret (pairing block, tokens) in a command-line argument or in your own
   logs. The pairing block goes through stdin only.
@@ -43,7 +45,7 @@ It prints `setup.sh would:` and a list of actions, and exits 0.
 ## 2. Install
 
 ```sh
-git clone --depth 1 -b v0.2.0 https://github.com/nevoflux-browser/nevoflux-muse ~/.local/share/nevoflux-muse/src
+git clone --depth 1 -b v0.3.0 https://github.com/nevoflux-browser/nevoflux-muse ~/.local/share/nevoflux-muse/src
 ~/.local/share/nevoflux-muse/src/setup.sh
 ```
 
@@ -51,7 +53,7 @@ Expected: `setup.sh` ends with one JSON line from `nf setup` followed by a text 
 
 ```text
 {"supervision": "systemd-user", "started": false, "unit": "/home/<you>/.config/systemd/user/nevoflux-muse.service"}
-Installed nevoflux-muse v0.2.0 into /home/<you>/.local/share/nevoflux-muse.
+Installed nevoflux-muse v0.3.0 into /home/<you>/.local/share/nevoflux-muse.
 Next (INSTALL.md): ...
 ```
 
@@ -59,7 +61,7 @@ Next (INSTALL.md): ...
   its path) or `detached+watchdog` (no usable systemd user session; the watchdog in step 3
   keeps it running; `unit` is `null`). Either is fine. `started` is `false` until pairing
   and sign-in are done.
-- Check: `~/.local/bin/nf version --json` prints `{"client": "0.2.0", "protocol": {...}}`.
+- Check: `~/.local/bin/nf version --json` prints `{"client": "0.3.0", "protocol": {...}}`.
 
 If it fails:
 
@@ -198,22 +200,96 @@ block." Other states follow the table.
 ~/.local/bin/nf tools
 ```
 
-Expected: `nevoflux-muse 0.2.0 (protocol 1-1)`, then one line per browser tool, for example `browser_snapshot`
-and `browser_navigate`. With `--json`, `nf tools` prints a JSON array of tool objects.
+Expected: `nevoflux-muse 0.3.0 (protocol 1-1)`, then one line per browser tool, 16 in all:
+`browser_snapshot`, `browser_get_markdown`, `browser_screenshot`, `browser_get_tabs`,
+`browser_navigate`, `browser_wait_for`, `browser_click_by_id`, `browser_fill_by_id`,
+`browser_type_by_id`, `browser_click`, `browser_fill`, `browser_type`, `browser_key_press`,
+`browser_scroll`, `browser_activate_tab` and `browser_upload_file`. With `--json`, `nf tools`
+prints a JSON array of tool objects with their argument schemas.
 
 If `nf tools` exits 1, run `nf status --json` and use the table below.
 
-Try one call if you like:
+Try a call that changes nothing:
 
 ```sh
-~/.local/bin/nf call browser_snapshot
+~/.local/bin/nf call browser_get_tabs --json
 ```
 
-`nf call <tool> key=value ...` takes values as JSON when they parse as JSON and as strings
-otherwise. For arguments that may be secret use
-`printf '%s' '{"text": "..."}' | nf call browser_type --args-stdin`. `--timeout <seconds>`
-defaults to 120. Exit 1 means the call failed or the tool reported an error; the message is
-in the output.
+Expected: exit 0 and the person's open tabs; each has `owned`, `true` only for tabs you
+opened.
+
+### Using the browser
+
+- `nf call <tool> key=value ...` takes values as JSON when they parse as JSON and as strings
+  otherwise. For arguments that may be secret use
+  `printf '%s' '{"text": "..."}' | nf call browser_type --args-stdin`. `--timeout <seconds>`
+  defaults to 120.
+- `nf call browser_navigate url=https://example.com` opens the page in a tab of your own, in
+  the background: the person's tab is not touched. `browser_navigate` only opens `http` and
+  `https` URLs (or `about:blank`). Calls without `tab_id` act on that tab; `new_tab=true`
+  opens another one.
+- To act on any other tab, pass `tab_id=<id>`. A `tab_id` must come from your own
+  `browser_navigate` or from a `browser_get_tabs` result in the current browser session;
+  any other id (or one from before the browser restarted) fails with `tab_closed`.
+  `browser_activate_tab` needs a `tab_id`.
+- The person decides what you may do, with `/agent-tier` in NevoFlux. A new pairing starts at
+  `read-only`: reading pages, screenshots, listing tabs and navigating. Clicking, typing,
+  scrolling and switching tabs need `browser-auto`; uploading a file needs `full-auto`. When
+  the person changes the tier, it applies from your next call.
+- Exit 1 means the call failed; see "When a call fails". Exit 3 means NevoFlux asks for an
+  approval first; see the next section.
+
+## Handling approvals (exit code 3)
+
+Some calls need a yes first, because of a rule the person set in NevoFlux. Then `nf call`
+returns at once with exit 3 and
+
+```json
+{"approval_required": {"id": "3f9a1c2e", "message": "...", "expires_in": 55}}
+```
+
+Nothing has happened yet: the call waits in NevoFlux. `message` says what it would do.
+Answer within `expires_in` seconds:
+
+```sh
+~/.local/bin/nf approve 3f9a1c2e --json
+~/.local/bin/nf deny 3f9a1c2e --json
+```
+
+- `nf approve` runs the call and prints its result exactly as `nf call` would (exit 0, 1, or
+  3 if the same call needs another approval: answer the new id).
+- `nf deny` refuses it: exit 1 and `{"error": "approval_denied", ...}`.
+- Approve only what the person asked for or clearly wants. If you are not sure, ask first,
+  and answer before `expires_in` runs out.
+  Tell the person (when unsure): "NevoFlux asks before I do this: <message>. Shall I go
+  ahead? I need your answer within <expires_in> seconds."
+- If nobody answers in time, NevoFlux refuses the call (`approval_timeout`). Call again if it
+  is still wanted.
+- `{"error": "approval_expired", ...}` (exit 1) from `nf approve` or `nf deny`: that question
+  is closed (time ran out, it was already answered, or the connection restarted). If you had
+  not answered it, nothing ran; call again if it is still wanted.
+- `nf pending --json` lists the open questions:
+  `[{"id": "...", "tool": "...", "message": "...", "expires_in": 40}]` (`tool` is `null` when
+  the question arrived with no call of yours running).
+
+## When a call fails
+
+`nf call` (and `nf approve` / `nf deny`) exit 1 with `{"error": "<code>", "message": "...",
+...}` when NevoFlux refuses or the browser fails. Other failures (the bridge is down, no
+connection) keep the form `{"error": "<sentence>", "code": "..."}`; for those run
+`nf status --json` and use the table below.
+
+| `error` | meaning | what to do |
+| --- | --- | --- |
+| `tier_denied` | Your tier (`tier`) does not allow this tool; it needs `required`. | Do not retry. Tell the person: "To let me <what you wanted to do>, please run `/agent-tier <my name in NevoFlux> <required>` in NevoFlux." |
+| `approval_denied` | The call was refused; `reason` says why: `declined` (the person said no), `client_cannot_approve` (this client cannot take approvals), `rule` (a site rule, pack hook or allowlist refused it), or `approval_failed` (the question could not be asked or answered). | Do not retry the same call. For `client_cannot_approve`, upgrade (see "Upgrade"). |
+| `approval_timeout` | Nobody answered the approval within 60 seconds. | Call again and answer in time. |
+| `browser_unavailable` | NevoFlux on the person's computer is not connected. | Tell the person: "Please open NevoFlux on your computer." Retry later. |
+| `no_agent_tab` | No tab of yours yet, and no `tab_id` given. | `browser_navigate` first, or pass `tab_id`. |
+| `tab_closed` | The tab (`tab_id`) is closed, or was never yours to use: the id did not come from your own `browser_navigate` or a `browser_get_tabs` result in this browser session. | `browser_get_tabs` for a current id, or `browser_navigate`: it opens a new tab of yours. |
+| `tool_failed` | The call was malformed (e.g. a bad `tab_id`, or a non-http(s) URL), or the browser failed it or did not answer within 150 s; the action may still have happened. `detail` says which. | Read `detail`, check the page with `browser_snapshot` if the action may have happened, adjust the arguments, retry once. |
+| `unknown_tool` | NevoFlux does not offer this tool. | Check the name with `nf tools`. |
+| `approval_expired` | The approval you answered is no longer open. | See "Handling approvals". |
 
 ## `nf status` states
 

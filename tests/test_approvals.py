@@ -99,18 +99,55 @@ async def test_the_echoed_call_id_wins_otherwise_the_oldest_free_call():
     await asyncio.gather(pinned, unpinned, third, return_exceptions=True)
 
 
-async def test_a_stamp_naming_no_running_call_is_never_given_to_another_call():
+async def test_a_stamp_naming_no_running_call_is_declined_at_once():
+    # Parked, it could only expire: nobody's `nf call` is waiting for it, and approving it
+    # could never be tied to a call the person saw. Decline it now, never give it to another.
     a = Approvals()
     gone = a.open_call("browser_type")
     a.close_call(gone)  # e.g. the client already gave up on it
     running = a.open_call("browser_click")
-    asking = asyncio.create_task(a.elicit(CTX, form(meta={CALL_META: gone.id})))
+    for meta in ({CALL_META: gone.id}, {CALL_META: 7}):
+        result = await asyncio.wait_for(a.elicit(CTX, form(meta=meta)), 1)
+        assert result.action == "decline"
+        assert running.approval is None and not running.asked.is_set()
+        assert a.pending() == [] and a._open == {}
+
+
+async def test_a_stamp_naming_a_finished_call_is_declined_at_once():
+    a = Approvals()
+    done = a.open_call("browser_click")
+    done.task = asyncio.create_task(asyncio.sleep(0))
+    await done.task  # finished; its done-callback has not removed it yet
+    result = await asyncio.wait_for(a.elicit(CTX, form(meta={CALL_META: done.id})), 1)
+    assert result.action == "decline" and a.pending() == [] and done.approval is None
+
+
+async def test_an_answer_is_refused_once_its_call_has_finished():
+    a = Approvals()
+    call = a.open_call("browser_click")
+    call.task = asyncio.create_task(asyncio.sleep(5))
+    asking = asyncio.create_task(a.elicit(CTX, form(meta={CALL_META: call.id})))
     await asyncio.sleep(0)
-    assert running.approval is None and not running.asked.is_set()
     [listed] = a.pending()
-    assert listed["tool"] is None
+    call.task.cancel()
+    await asyncio.gather(call.task, return_exceptions=True)
+    assert a.answer(listed["id"], True) is None
     asking.cancel()
     await asyncio.gather(asking, return_exceptions=True)
+
+
+async def test_cancel_open_answers_every_open_question_with_cancel():
+    a = Approvals()
+    call = a.open_call("browser_click")
+    asking = asyncio.create_task(a.elicit(CTX, form()))
+    loose = asyncio.create_task(a.elicit(CTX, form()))
+    await asyncio.sleep(0)
+    ids = [p["id"] for p in a.pending()]
+    a.cancel_open()
+    assert [a.answer(i, True) for i in ids] == [None, None]
+    results = await asyncio.wait_for(asyncio.gather(asking, loose), 1)
+    assert [r.action for r in results] == ["cancel", "cancel"]
+    assert a.pending() == [] and call.approval is None
 
 
 async def test_only_true_approves():

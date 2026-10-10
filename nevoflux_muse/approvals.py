@@ -11,11 +11,15 @@ give up on its own (it cancels the request, or the session ends), then answers
 
 Which call a question belongs to: the bridge stamps every tools/call with
 _meta[CALL_META] = the call's id. A head that copies it into the elicitation's
-_meta pins the question to that call; a stamp naming no running call leaves
-the question with no call, so approving another call can never authorise it.
-An unstamped question goes to the oldest running call without an open
-question: exact while one call runs at a time, which is how agents use `nf`. Other _meta keys (the real head adds
-progressToken, equal to the request id) are ignored.
+_meta pins the question to that call; a stamp naming no running call is
+declined at once: nobody is waiting for it, and approving another call must
+never authorise it. An unstamped question goes to the oldest running call
+without an open question: exact while one call runs at a time, which is how
+agents use `nf`. Other _meta keys (the real head adds progressToken, equal to
+the request id) are ignored.
+
+Once a call has finished, or the bridge is stopping, no answer is accepted:
+stop answers every open question "cancel" before it takes the calls down.
 
 The log names approval ids, tools and outcomes, never the head's message: it
 can quote what the call would type or open.
@@ -108,6 +112,10 @@ class Call:
     asked: asyncio.Event = field(default_factory=asyncio.Event)
 
 
+def _finished(call: Call) -> bool:
+    return call.task is not None and call.task.done()
+
+
 @dataclass(eq=False)
 class Approval:
     id: str
@@ -145,16 +153,17 @@ class Approvals:
     def close_call(self, call: Call) -> None:
         self._calls.pop(call.id, None)
 
-    def _owner(self, meta: object) -> Call | None:
+    def _owner(self, meta: object) -> tuple[bool, Call | None]:
+        """(stamped, owner). A stamped question belongs to that running call or to none."""
         wanted = meta.get(CALL_META) if isinstance(meta, dict) else None
         if wanted is not None:
-            # A stamped question belongs to that call or to none: never guess another call,
-            # or approving that one would authorise this action.
-            return self._calls.get(wanted) if isinstance(wanted, str) else None
+            # Never guess another call: approving that one would authorise this action.
+            call = self._calls.get(wanted) if isinstance(wanted, str) else None
+            return True, call if call is not None and not _finished(call) else None
         for call in self._calls.values():
-            if call.approval is None and not (call.task is not None and call.task.done()):
-                return call
-        return None
+            if call.approval is None and not _finished(call):
+                return False, call
+        return False, None
 
     async def elicit(self, context, params) -> types.ElicitResult:
         """The ClientSession elicitation callback: park the question until it is answered."""
@@ -164,7 +173,10 @@ class Approvals:
         meta = getattr(context, "meta", None)
         if meta is None:
             meta = params.meta
-        call = self._owner(meta)
+        stamped, call = self._owner(meta)
+        if stamped and call is None:
+            log.info("declined a question for a call that is not running")
+            return types.ElicitResult(action="decline")
         approval = Approval(id=self._new_id(), message=params.message,
                             expires_at=self._clock() + self.window,
                             answer=asyncio.get_running_loop().create_future(), call=call)
@@ -179,7 +191,8 @@ class Approvals:
         outcome = "gone"
         try:
             result = await asyncio.wait_for(approval.answer, self.hold)
-            outcome = "approved" if result.action == "accept" else "denied"
+            outcome = {"accept": "approved", "decline": "denied"}.get(result.action,
+                                                                       "cancelled")
             return result
         except asyncio.TimeoutError:
             outcome = "expired"
@@ -197,6 +210,8 @@ class Approvals:
         approval = self._open.get(approval_id)
         if approval is None or approval.answer.done() or self._clock() >= approval.expires_at:
             return None
+        if approval.call is not None and _finished(approval.call):
+            return None  # the call it would authorise is over: nothing left to approve
         approval.answer.set_result(
             types.ElicitResult(action="accept", content={"approve": True}) if approve is True
             else types.ElicitResult(action="decline"))
@@ -206,6 +221,12 @@ class Approvals:
             # gets its own timeout again, from now, not whatever is left of the hold.
             call.deadline.restart()
         return approval
+
+    def cancel_open(self) -> None:
+        """Answer every open question "cancel" now, so no later answer can approve it."""
+        for approval in list(self._open.values()):
+            if not approval.answer.done():
+                approval.answer.set_result(types.ElicitResult(action="cancel"))
 
     def pending(self) -> list[dict]:
         """The questions still open to an answer: [{"id", "tool", "message", "expires_in"}]."""

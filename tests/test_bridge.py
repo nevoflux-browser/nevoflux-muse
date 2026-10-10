@@ -596,3 +596,42 @@ async def test_a_raised_flag_with_an_answered_question_is_not_news(tmp_path):
         assert caught.value.reply["error"]["code"] == "timeout"
     finally:
         call.task.cancel()
+
+
+class _ApproveDuringStop:
+    """A call that asks, then, as stop cancels it, tries `nf approve` (the race in a stop)."""
+
+    def __init__(self, holder):
+        self.holder = holder
+
+    async def call_tool(self, tool, args, *, meta, **kw):
+        b, out = self.holder[0], self.holder[1]
+        ask = types.ElicitRequestFormParams.model_validate(
+            {"message": "q", "requestedSchema": APPROVAL_SCHEMA, "_meta": meta})
+        asking = asyncio.ensure_future(b.approvals.elicit(SimpleNamespace(meta=None), ask))
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            [listed] = b.approvals.pending() or [{"id": "none"}]
+            out["approve"] = await b.handle({"op": "approve", "id": listed["id"],
+                                             "timeout": 0.2})
+            out["head_got"] = (await asyncio.wait_for(asking, 1)).action
+            raise
+
+
+async def test_stop_cancels_open_approvals_before_it_cancels_calls(tmp_path):
+    holder, out = [], {}
+
+    class Conn(_StubConn):
+        async def session(self, timeout):
+            return _ApproveDuringStop(holder)
+
+    b = Bridge(tmp_path, connection_factory=Conn)
+    holder.extend([b, out])
+    await b.start()
+    pending = asyncio.create_task(b.handle(click()))
+    await until(lambda: len(b.approvals.pending()) == 1)
+    await b.stop()
+    assert out["approve"]["error"]["code"] == "approval_expired"
+    assert out["head_got"] == "cancel"
+    assert (await asyncio.wait_for(pending, 1))["approval_required"]

@@ -111,7 +111,10 @@ class Bridge:
 
     async def _stop(self) -> None:
         # Take down every call this connection started, waiting for an approval or not:
-        # none outlives it in the background (their callers get connection_lost).
+        # none outlives it in the background (their callers get connection_lost). Open
+        # questions are answered "cancel" first, so an `nf approve` that lands while the
+        # calls wind down finds nothing to approve.
+        self.approvals.cancel_open()
         running = list(self._running)
         for task in running:
             task.cancel()
@@ -303,6 +306,7 @@ class Bridge:
         if call is None or call.task is None:
             return {"ok": True, "answered": "approved" if approve else "denied"}
         return await self._follow(call, wait)
+
 
 async def serve(bridge: Bridge, path: Path):
     async def on_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:

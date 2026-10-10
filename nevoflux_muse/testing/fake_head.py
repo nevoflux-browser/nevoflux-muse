@@ -8,7 +8,8 @@ Mirrors the head (protocol §4-§5, and the stub head's tool table):
   - answers initialize with serverInfo.name "nevoflux-head" and
     capabilities.experimental.nevoflux.protocol; tools/list from its table;
     tools/call of a listed tool with a text result, of another whitelisted
-    tool with -32602 "unavailable", of anything else with "not_allowed"
+    tool with -32602 "unavailable", of anything else with an unknown_tool
+    tool error
   - test knobs: ignore_initialize / fail_initialize swallow or reject that many
     initialize requests
   - M2a: tools in `ask` need an approval: the head sends a form elicitation
@@ -200,10 +201,14 @@ class FakeHead:
             name = params.get("name")
             if name in self.hang:
                 return
+            if name not in WHITELIST:
+                await self._send({"jsonrpc": "2.0", "id": mid, "result": tool_error(
+                    "unknown_tool", f"{name} is not offered")})
+                return
             if name not in self.tools:
-                code = "unavailable" if name in WHITELIST else "not_allowed"
                 await self._send({"jsonrpc": "2.0", "id": mid, "error": {
-                    "code": -32602, "message": f"{name}: {code}", "data": {"code": code}}})
+                    "code": -32602, "message": f"{name}: unavailable",
+                    "data": {"code": "unavailable"}}})
                 return
             if name in self.errors:
                 result = tool_error(**self.errors[name])

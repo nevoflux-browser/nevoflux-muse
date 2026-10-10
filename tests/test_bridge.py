@@ -118,10 +118,19 @@ async def test_tools_and_call(bridge, head):
 
 
 async def test_head_errors_are_mcp_errors(bridge, head):
-    reply = await bridge.handle({"op": "call", "tool": "bash", "args": {"command": "id"}})
+    # M1 behaviour kept for a whitelisted tool the head does not list: a JSON-RPC error.
+    reply = await bridge.handle({"op": "call", "tool": "browser_click", "args": {}})
     assert reply["error"]["code"] == "mcp_error"
     assert reply["error"]["data"]["code"] == -32602
-    assert reply["error"]["data"]["data"] == {"code": "not_allowed"}
+    assert reply["error"]["data"]["data"] == {"code": "unavailable"}
+
+
+async def test_a_tool_outside_the_whitelist_is_an_unknown_tool_result(bridge, head):
+    reply = await bridge.handle({"op": "call", "tool": "bash", "args": {"command": "id"}})
+    assert reply["ok"] is True
+    result = reply["result"]
+    assert result["isError"] is True
+    assert result["structuredContent"]["error"]["code"] == "unknown_tool"
 
 
 async def test_not_connected_while_the_head_is_away(relay, tmp_path):

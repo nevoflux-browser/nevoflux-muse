@@ -63,8 +63,11 @@ async def test_round_trip(relay, head):
         result = await s.call_tool("browser_snapshot", {})
         assert result.content[0].text == "fake browser_snapshot"
         with pytest.raises(MCPError) as e:
-            await s.call_tool("bash", {"command": "id"})
-        assert e.value.code == -32602 and e.value.data == {"code": "not_allowed"}
+            await s.call_tool("browser_click", {})
+        assert e.value.code == -32602 and e.value.data == {"code": "unavailable"}
+        refused = await s.call_tool("bash", {"command": "id"})
+        assert refused.is_error is True
+        assert refused.structured_content["error"]["code"] == "unknown_tool"
     init = next(m for m in head.requests if m.get("method") == "initialize")
     assert init["params"]["clientInfo"]["name"] == "nevoflux-muse"
 

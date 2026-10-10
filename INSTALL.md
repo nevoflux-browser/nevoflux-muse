@@ -290,7 +290,7 @@ connection) have the form `{"error": "<sentence>"}` and may carry a `code`; for 
 | --- | --- | --- |
 | `tier_denied` | Your tier (`tier`) does not allow this tool; it needs `required`. | Do not retry. Tell the person: "To let me <what you wanted to do>, please run `/agent-tier <my name in NevoFlux> <required>` in NevoFlux." |
 | `approval_denied` | The call was refused; `reason` (only when NevoFlux sent one; `nf deny` prints none) says why: `declined` (the person said no), `client_cannot_approve` (this client cannot take approvals), `rule` (a site rule, pack hook or allowlist refused it), or `approval_failed` (the question could not be asked or answered). | Do not retry the same call. For `client_cannot_approve`: if `nf version` is below 0.3.0, upgrade (see "Upgrade"); on 0.3.0 or later upgrading will not help, so stop and tell the person that this client cannot take approvals. |
-| `approval_timeout` | Nobody answered the approval within 60 seconds. | Call again and answer in time. |
+| `approval_timeout` | Nobody answered the approval within 60 seconds. | Ask the person again; if it is still wanted, call again, and approve only on their explicit yes. |
 | `browser_unavailable` | NevoFlux on the person's computer is not connected. | Tell the person: "Please open NevoFlux on your computer." Retry later. |
 | `no_agent_tab` | No tab of yours yet, and no `tab_id` given. | `browser_navigate` first, or pass `tab_id`. |
 | `tab_closed` | The tab (`tab_id`) is closed, or was never yours to use: the id did not come from your own `browser_navigate` or a `browser_get_tabs` result in this browser session. | `browser_get_tabs` for a current id, or `browser_navigate`: it opens a new tab of yours. |

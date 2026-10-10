@@ -19,8 +19,6 @@ import subprocess
 import sys
 import uuid
 
-from mcp import MCPError
-
 from nevoflux_muse import crypto
 from nevoflux_muse.pairing import Pairing
 from nevoflux_muse.session import HeadConnection
@@ -61,12 +59,9 @@ async def run(stub: str | None) -> int:
             result = await s.call_tool("browser_snapshot", {})
             print("tools/call browser_snapshot:", result.model_dump(mode="json", exclude_none=True))
             assert not result.is_error
-            try:
-                await s.call_tool("bash", {"command": "id"})
-                raise AssertionError("bash should be refused")
-            except MCPError as e:
-                print("tools/call bash:", e.code, e.data)
-                assert e.data == {"code": "not_allowed"}
+            refused = await s.call_tool("bash", {"command": "id"})
+            print("tools/call bash:", refused.model_dump(mode="json", exclude_none=True))
+            assert refused.is_error and refused.structured_content["error"]["code"] == "unknown_tool"
         print("OK")
         return 0
     finally:

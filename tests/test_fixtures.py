@@ -11,7 +11,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import check_fixtures
 
 NAMES = ["PROTOCOL_VERSION", "kdf.json", "pairing_code.json", "seal.json",
-         "envelope.json", "mcp_messages.json"]
+         "envelope.json", "mcp_messages.json", "tool_errors.json"]
 
 
 def test_every_fixture_is_present():

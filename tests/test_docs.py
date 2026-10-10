@@ -56,3 +56,38 @@ def test_install_pins_the_approval_rule():
     assert "if `nf version` is below 0.3.0, upgrade" in install
     assert "Never blindly retry a non-idempotent action" in install
     assert '`{"approved": true}`' in install
+
+
+def test_install_never_has_the_agent_repeat_the_approval_message():
+    # I1: the head's message can quote up to 50 characters of a typed or filled value.
+    install = " ".join(read("INSTALL.md").split())
+    assert "NevoFlux asks before I do this: <message>" not in install
+    assert "describing the action in your own words" in install
+    assert "without quoting any typed or filled value from `message`" in install
+    assert "never quote a value you passed with `--args-stdin`" in install
+    assert "Never paste `message` or `nf pending` output into logs or transcripts" in install
+
+
+def test_install_says_a_timeout_after_approve_may_have_acted():
+    # I2: timeout / connection_lost after nf approve or nf call is not a status problem.
+    install = " ".join(read("INSTALL.md").split())
+    row = next(line for line in read("INSTALL.md").splitlines()
+               if line.startswith("| `code` `timeout` or `connection_lost`"))
+    assert "`nf approve`" in row and "`nf call`" in row
+    assert "may still have happened" in row
+    assert "Check `nf pending --json` and take a `browser_snapshot`" in row
+    assert "Never blindly retry a non-idempotent action" in row
+    assert "Do not run `nf status` for this" in row
+    assert "except `code` `timeout` or `connection_lost`" in install
+
+
+def test_install_deny_retry_and_tier_wording():
+    install = " ".join(read("INSTALL.md").split())
+    assert "(no `reason`)" not in install
+    assert "with `reason` `declined`" in install
+    assert "after the person replies, repeat the call" not in install.lower()
+    assert "Repeat the call only after the person explicitly says yes" in install
+    assert "only if its `message` describes the same action the person approved" in install
+    assert "<my name in NevoFlux>" not in install
+    assert "`/agent-tier <id> <required>`" in install
+    assert "as `/devices` shows it (the same id `/unpair` takes)" in install

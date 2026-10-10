@@ -11,11 +11,21 @@ Mirrors the head (protocol §4-§5, and the stub head's tool table):
     tool with -32602 "unavailable", of anything else with "not_allowed"
   - test knobs: ignore_initialize / fail_initialize swallow or reject that many
     initialize requests
+  - M2a: tools in `ask` need an approval: the head sends a form elicitation
+    (APPROVAL_SCHEMA) and runs the tool only on accept + approve=true; a client
+    without the elicitation capability gets approval_denied
+    (client_cannot_approve); no answer within approval_timeout sends
+    notifications/cancelled and approval_timeout. Tools in `errors` return that
+    structured tool error (tool_error()). Like the real head, every elicitation
+    carries _meta.progressToken equal to its request id, and (echo_call_meta, on
+    by default) copies the call's _meta["io.nevoflux/call"].
 
 Known deviations from the real head (do not rely on these here):
   - no bad-frame limit (the head drops the session after 8 refused frames)
   - no 32-message inbound buffer
   - serverInfo.version is "0.0.0-fake"; tool results are fixed text
+  - a whitelisted tool missing from `tools` still answers the M1 JSON-RPC error
+    "unavailable"; the M2 head answers structured tool errors instead
 """
 
 from __future__ import annotations
@@ -23,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import json
 import os
 
 import websockets
@@ -35,17 +46,36 @@ WHITELIST = (
     "browser_type_by_id", "browser_click", "browser_fill", "browser_type", "browser_key_press",
     "browser_scroll", "browser_wait_for", "browser_upload_file",
 )
+# Task 3 moves these two into approvals.py.
+APPROVAL_SCHEMA = {"type": "object", "properties": {"approve": {"type": "boolean"}},
+                   "required": ["approve"]}
+CALL_META = "io.nevoflux/call"
+
+
+def tool_error(code: str, message: str, **extra) -> dict:
+    """A tool error as the M2 head returns it (M2a spec section 5): content[0].text is the
+    structuredContent object as JSON."""
+    structured = {"error": {"code": code, "message": message, **extra}}
+    return {"content": [{"type": "text", "text": json.dumps(structured)}], "isError": True,
+            "structuredContent": structured}
 
 
 class FakeHead:
     def __init__(self, relay_url: str, channel: str, key: bytes, *, token: str = "test",
                  protocol: int = 1, tools: tuple[str, ...] = ("browser_snapshot", "browser_navigate"),
                  hang: tuple[str, ...] = ("hang",), silent: bool = False,
-                 ignore_initialize: int = 0, fail_initialize: int = 0):
+                 ignore_initialize: int = 0, fail_initialize: int = 0,
+                 ask: tuple[str, ...] = (), approval_timeout: float = 60.0,
+                 errors: dict[str, dict] | None = None, echo_call_meta: bool = True):
         self.relay_url, self.channel, self.key, self.token = relay_url, channel, key, token
         self.protocol, self.tools, self.hang, self.silent = protocol, tools, hang, silent
         self.ignore_initialize, self.fail_initialize = ignore_initialize, fail_initialize
+        self.ask, self.approval_timeout = ask, approval_timeout
+        self.errors, self.echo_call_meta = dict(errors or {}), echo_call_meta
         self.requests: list[dict] = []
+        self.sent: list[dict] = []
+        self.answers: list[dict] = []
+        self.client_caps: dict = {}
         self.arrivals = 0
         self._ch: str | None = None
         self._out_n = 0
@@ -53,6 +83,10 @@ class FakeHead:
         self._challenges: list[dict] = []
         self._link: RelayLink | None = None
         self._task: asyncio.Task | None = None
+        self._send_lock = asyncio.Lock()
+        self._asked = 0
+        self._waiting: dict[str, asyncio.Future] = {}
+        self._jobs: set[asyncio.Task] = set()
 
     async def start(self) -> FakeHead:
         self._link = await RelayLink.connect(self.relay_url, self.channel, self.token, self.key)
@@ -60,6 +94,8 @@ class FakeHead:
         return self
 
     async def stop(self) -> None:
+        for job in list(self._jobs):
+            job.cancel()
         if self._task:
             self._task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -96,12 +132,13 @@ class FakeHead:
             pass
 
     async def _challenge(self) -> None:
-        self._ch = base64.urlsafe_b64encode(os.urandom(16)).rstrip(b"=").decode()
-        self._last_in = -1
-        frame = {"d": "h2c", "n": 0, "ch": self._ch, "m": None}
-        self._challenges.append(frame)
-        self._out_n = 1
-        await self._link.send({"k": "frame", "frame": frame})
+        async with self._send_lock:
+            self._ch = base64.urlsafe_b64encode(os.urandom(16)).rstrip(b"=").decode()
+            self._last_in = -1
+            frame = {"d": "h2c", "n": 0, "ch": self._ch, "m": None}
+            self._challenges.append(frame)
+            self._out_n = 1
+            await self._link.send({"k": "frame", "frame": frame})
 
     def _accept(self, f: object) -> bool:
         if not (isinstance(f, dict) and {"d", "n", "ch", "m"} <= f.keys()):
@@ -117,15 +154,22 @@ class FakeHead:
         return True
 
     async def _send(self, m: dict) -> None:
-        frame = {"d": "h2c", "n": self._out_n, "ch": self._ch, "m": m}
-        self._out_n += 1
-        await self._link.send({"k": "frame", "frame": frame})
+        async with self._send_lock:
+            self.sent.append(m)
+            frame = {"d": "h2c", "n": self._out_n, "ch": self._ch, "m": m}
+            self._out_n += 1
+            await self._link.send({"k": "frame", "frame": frame})
 
     async def _handle(self, m: dict) -> None:
         self.requests.append(m)
         method, mid = m.get("method"), m.get("id")
+        if method is None and isinstance(mid, str) and mid in self._waiting:
+            waiting = self._waiting.pop(mid)
+            if not waiting.done():
+                waiting.set_result(m)
+            return
         if method is None or mid is None:
-            return  # a notification or a response
+            return  # a notification or another response
         params = m.get("params") or {}
         if method == "initialize":
             if self.ignore_initialize > 0:
@@ -136,6 +180,7 @@ class FakeHead:
                 await self._send({"jsonrpc": "2.0", "id": mid,
                                   "error": {"code": -32603, "message": "initialize failed"}})
                 return
+            self.client_caps = params.get("capabilities") or {}
             result = {
                 "protocolVersion": params.get("protocolVersion", "2025-11-25"),
                 "capabilities": {"tools": {}, "experimental": {"nevoflux": {"protocol": self.protocol}}},
@@ -154,9 +199,51 @@ class FakeHead:
                 await self._send({"jsonrpc": "2.0", "id": mid, "error": {
                     "code": -32602, "message": f"{name}: {code}", "data": {"code": code}}})
                 return
-            result = {"content": [{"type": "text", "text": f"fake {name}"}]}
+            if name in self.errors:
+                result = tool_error(**self.errors[name])
+            elif name in self.ask:
+                job = asyncio.create_task(self._ask_then_answer(mid, name, params))
+                self._jobs.add(job)
+                job.add_done_callback(self._jobs.discard)
+                return
+            else:
+                result = {"content": [{"type": "text", "text": f"fake {name}"}]}
         else:
             await self._send({"jsonrpc": "2.0", "id": mid,
                               "error": {"code": -32601, "message": "method not found"}})
             return
+        await self._send({"jsonrpc": "2.0", "id": mid, "result": result})
+
+    async def _ask_then_answer(self, mid, name: str, params: dict) -> None:
+        if "elicitation" not in self.client_caps:
+            result = tool_error("approval_denied", "the client cannot ask for approval",
+                                reason="client_cannot_approve")
+        else:
+            self._asked += 1
+            eid = f"e{self._asked}"
+            waiting = asyncio.get_running_loop().create_future()
+            self._waiting[eid] = waiting
+            meta: dict = {"progressToken": eid}
+            call = (params.get("_meta") or {}).get(CALL_META)
+            if self.echo_call_meta and call is not None:
+                meta[CALL_META] = call
+            await self._send({"jsonrpc": "2.0", "id": eid, "method": "elicitation/create",
+                              "params": {"mode": "form", "message": f"Allow {name}?",
+                                         "requestedSchema": APPROVAL_SCHEMA, "_meta": meta}})
+            try:
+                reply = await asyncio.wait_for(waiting, self.approval_timeout)
+            except asyncio.TimeoutError:
+                self._waiting.pop(eid, None)
+                await self._send({"jsonrpc": "2.0", "method": "notifications/cancelled",
+                                  "params": {"requestId": eid, "reason": "approval timed out"}})
+                result = tool_error("approval_timeout", "nobody answered the approval in time")
+            else:
+                self.answers.append(reply)
+                answer = reply.get("result") or {}
+                if (answer.get("action") == "accept"
+                        and (answer.get("content") or {}).get("approve") is True):
+                    result = {"content": [{"type": "text", "text": f"fake {name}"}]}
+                else:
+                    result = tool_error("approval_denied", "the approval was refused",
+                                        reason="declined")
         await self._send({"jsonrpc": "2.0", "id": mid, "result": result})

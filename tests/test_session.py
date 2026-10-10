@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 import anyio
 import pytest
@@ -17,6 +18,7 @@ from nevoflux_muse.session import (
     RelayRejected,
 )
 from nevoflux_muse.testing import FakeHead, FakeRelay
+from nevoflux_muse.testing.fake_head import APPROVAL_SCHEMA
 from nevoflux_muse.transport import RelayLink, RelayRefused
 
 KEY = bytes(range(32))
@@ -419,3 +421,87 @@ async def test_initialize_declares_elicitation_only_with_a_callback(relay, head)
         await conn.session(timeout=5)
     asking = next(m for m in head.requests if m.get("method") == "initialize")
     assert "form" in asking["params"]["capabilities"]["elicitation"]
+
+
+def _asking_connection(relay, callback=None):
+    conn = HeadConnection(pairing(relay), fixed_token, **FAST)
+    conn.elicitation_callback = callback
+    return conn
+
+
+async def test_fake_head_asks_and_honours_the_answer(relay):
+    head = await FakeHead(relay.url, CHANNEL, KEY, tools=("browser_click",),
+                          ask=("browser_click",)).start()
+    answers = iter([types.ElicitResult(action="accept", content={"approve": True}),
+                    types.ElicitResult(action="decline")])
+    seen = []
+
+    async def answer(context, params):
+        seen.append(params)
+        return next(answers)
+
+    try:
+        async with _asking_connection(relay, answer) as conn:
+            s = await conn.session(timeout=5)
+            ok = await s.call_tool("browser_click", {})
+            assert ok.is_error is False and ok.content[0].text == "fake browser_click"
+            denied = await s.call_tool("browser_click", {})
+            assert denied.is_error is True
+            assert denied.structured_content["error"]["code"] == "approval_denied"
+            assert denied.structured_content["error"]["reason"] == "declined"
+        assert seen[0].message == "Allow browser_click?"
+        assert seen[0].requested_schema == APPROVAL_SCHEMA
+        assert [a["result"]["action"] for a in head.answers] == ["accept", "decline"]
+        asks = [m for m in head.sent if m.get("method") == "elicitation/create"]
+        assert all(a["params"]["_meta"]["progressToken"] == a["id"] for a in asks)
+    finally:
+        await head.stop()
+
+
+async def test_fake_head_refuses_a_client_that_cannot_approve(relay):
+    head = await FakeHead(relay.url, CHANNEL, KEY, tools=("browser_click",),
+                          ask=("browser_click",)).start()
+    try:
+        async with _asking_connection(relay) as conn:
+            s = await conn.session(timeout=5)
+            r = await s.call_tool("browser_click", {})
+        err = r.structured_content["error"]
+        assert r.is_error and err["code"] == "approval_denied"
+        assert err["reason"] == "client_cannot_approve"
+        assert not any(m.get("method") == "elicitation/create" for m in head.sent)
+    finally:
+        await head.stop()
+
+
+async def test_fake_head_times_out_and_cancels_its_question(relay):
+    head = await FakeHead(relay.url, CHANNEL, KEY, tools=("browser_click",),
+                          ask=("browser_click",), approval_timeout=0.3).start()
+
+    async def never(context, params):
+        await asyncio.sleep(30)
+
+    try:
+        async with _asking_connection(relay, never) as conn:
+            s = await conn.session(timeout=5)
+            r = await asyncio.wait_for(s.call_tool("browser_click", {}), 5)
+        assert r.is_error and r.structured_content["error"]["code"] == "approval_timeout"
+        assert any(m.get("method") == "notifications/cancelled" for m in head.sent)
+    finally:
+        await head.stop()
+
+
+async def test_fake_head_structured_errors(relay):
+    head = await FakeHead(relay.url, CHANNEL, KEY, tools=("browser_click",), errors={
+        "browser_click": {"code": "tier_denied", "message": "needs browser-auto",
+                          "tier": "read-only", "required": "browser-auto"}}).start()
+    try:
+        async with _asking_connection(relay) as conn:
+            s = await conn.session(timeout=5)
+            r = await s.call_tool("browser_click", {})
+        expected = {"error": {"code": "tier_denied", "message": "needs browser-auto",
+                              "tier": "read-only", "required": "browser-auto"}}
+        assert r.is_error
+        assert r.structured_content == expected
+        assert json.loads(r.content[0].text) == expected
+    finally:
+        await head.stop()

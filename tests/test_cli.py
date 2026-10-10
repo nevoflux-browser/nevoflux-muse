@@ -662,3 +662,136 @@ def test_detach_without_a_pid_fails(home, capsys, monkeypatch):
 def test_status_reports_supervision(home, capsys):
     st.write_supervision(home, "detached+watchdog")
     assert run_json(capsys, "status")[1]["supervision"] == "detached+watchdog"
+
+
+APPROVAL = {"id": "3f9a1c2e", "message": "Allow browser_click?", "expires_in": 54}
+
+
+def test_a_call_that_needs_approval_exits_3(home, capsys, monkeypatch):
+    FakeBridge(monkeypatch, {"call": {"ok": True, "approval_required": APPROVAL}})
+    assert main(["call", "browser_click", "id=3", "--json"]) == 3
+    assert json.loads(capsys.readouterr().out) == {"approval_required": APPROVAL}
+    assert main(["call", "browser_click", "id=3"]) == 3
+    out = capsys.readouterr().out
+    assert "Allow browser_click?" in out and "54s" in out
+    assert "nf approve 3f9a1c2e" in out and "nf deny 3f9a1c2e" in out
+
+
+def test_approve_prints_the_call_result(home, capsys, monkeypatch):
+    fake = FakeBridge(monkeypatch, {"approve": {"ok": True, "result": RESULT}})
+    assert main(["approve", "3f9a1c2e", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == RESULT
+    assert fake.sent == [{"op": "approve", "id": "3f9a1c2e", "timeout": 120.0}]
+    assert main(["approve", "3f9a1c2e", "--timeout", "30"]) == 0
+    assert capsys.readouterr().out.splitlines()[0] == "hello"
+    assert fake.sent[-1]["timeout"] == 30.0
+
+
+def test_approve_can_meet_another_approval(home, capsys, monkeypatch):
+    other = {**APPROVAL, "id": "77aa00bb"}
+    FakeBridge(monkeypatch, {"approve": {"ok": True, "approval_required": other}})
+    assert main(["approve", "3f9a1c2e", "--json"]) == 3
+    assert json.loads(capsys.readouterr().out) == {"approval_required": other}
+
+
+def test_deny_prints_the_heads_refusal(home, capsys, monkeypatch):
+    refusal = {"content": [{"type": "text", "text": "refused"}], "isError": True,
+               "structuredContent": {"error": {"code": "approval_denied", "message": "refused",
+                                               "reason": "declined"}}}
+    fake = FakeBridge(monkeypatch, {"deny": {"ok": True, "result": refusal}})
+    assert main(["deny", "3f9a1c2e", "--json"]) == 1
+    assert json.loads(capsys.readouterr().out) == {
+        "error": "approval_denied", "message": "refused", "reason": "declined"}
+    assert fake.sent == [{"op": "deny", "id": "3f9a1c2e", "timeout": 120.0}]
+
+
+def test_answers_without_a_running_call(home, capsys, monkeypatch):
+    FakeBridge(monkeypatch, {"approve": {"ok": True, "answered": "approved"},
+                             "deny": {"ok": True, "answered": "denied"}})
+    assert main(["approve", "3f9a1c2e", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"approved": True}
+    assert main(["deny", "3f9a1c2e", "--json"]) == 1
+    assert json.loads(capsys.readouterr().out)["error"] == "approval_denied"
+
+
+def test_an_expired_approval(home, capsys, monkeypatch):
+    FakeBridge(monkeypatch, {"approve": {"ok": False, "error": {
+        "code": "approval_expired", "message": "that approval is no longer open"}}})
+    assert main(["approve", "3f9a1c2e", "--json"]) == 1
+    assert json.loads(capsys.readouterr().out) == {
+        "error": "approval_expired", "message": "that approval is no longer open"}
+    assert main(["approve", "3f9a1c2e"]) == 1
+    assert "nf: approval_expired: that approval is no longer open" in capsys.readouterr().err
+
+
+def test_a_call_lost_with_its_connection_fails(home, capsys, monkeypatch):
+    FakeBridge(monkeypatch, {"call": {"ok": False, "error": {
+        "code": "connection_lost", "message": "the connection to the browser was lost"}}})
+    assert main(["call", "browser_click", "--json"]) == 1
+    assert "connection to the browser was lost" in json.loads(capsys.readouterr().out)["error"]
+
+
+def test_pending(home, capsys, monkeypatch):
+    listed = [{"id": "3f9a1c2e", "tool": "browser_click", "message": "Allow browser_click?",
+               "expires_in": 40},
+              {"id": "0badf00d", "tool": None, "message": "Allow it?", "expires_in": 12}]
+    fake = FakeBridge(monkeypatch, {"pending": {"ok": True, "pending": listed}})
+    assert main(["pending", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == listed
+    assert fake.sent == [{"op": "pending"}]
+    assert main(["pending"]) == 0
+    assert capsys.readouterr().out.splitlines() == [
+        "3f9a1c2e  browser_click  40s  Allow browser_click?", "0badf00d  ?  12s  Allow it?"]
+
+
+def test_pending_joins_a_multi_line_message(home, capsys, monkeypatch):
+    message = "Click the button\nTab: Checkout\nWhy: to pay"
+    listed = [{"id": "3f9a1c2e", "tool": "browser_click", "message": message, "expires_in": 40}]
+    FakeBridge(monkeypatch, {"pending": {"ok": True, "pending": listed}})
+    assert main(["pending", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)[0]["message"] == message
+    assert main(["pending"]) == 0
+    assert capsys.readouterr().out.splitlines() == [
+        "3f9a1c2e  browser_click  40s  Click the button / Tab: Checkout / Why: to pay"]
+
+
+def test_pending_when_nothing_waits(home, capsys, monkeypatch):
+    FakeBridge(monkeypatch, {"pending": {"ok": True, "pending": []}})
+    assert main(["pending"]) == 0
+    assert capsys.readouterr().out.strip() == "No approvals are waiting."
+
+
+TOOL_ERRORS = [
+    ("unknown_tool", {}),
+    ("tier_denied", {"tier": "read-only", "required": "browser-auto"}),
+    ("approval_denied", {"reason": "client_cannot_approve"}),
+    ("approval_timeout", {}),
+    ("browser_unavailable", {}),
+    ("no_agent_tab", {}),
+    ("tab_closed", {"tab_id": 7}),
+    ("tool_failed", {"detail": "element 12 not found"}),
+]
+
+
+@pytest.mark.parametrize(("code", "extra"), TOOL_ERRORS)
+def test_call_tool_errors_print_their_code(home, capsys, monkeypatch, code, extra):
+    result = {"content": [{"type": "text", "text": "why"}], "isError": True,
+              "structuredContent": {"error": {"code": code, "message": "why", **extra}}}
+    FakeBridge(monkeypatch, {"call": {"ok": True, "result": result}})
+    assert main(["call", "browser_click", "--json"]) == 1
+    assert json.loads(capsys.readouterr().out) == {"error": code, "message": "why", **extra}
+    assert main(["call", "browser_click"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == "" and f"nf: {code}: why" in captured.err
+
+
+@pytest.mark.parametrize("argv", [["approve", "x"], ["deny", "x"], ["pending"]])
+def test_approval_commands_on_windows(home, capsys, argv):
+    assert main([*argv, "--json"]) == 1
+    assert "unsupported on Windows" in json.loads(capsys.readouterr().out)["error"]
+
+
+def test_approve_needs_an_id(home, capsys):
+    with pytest.raises(SystemExit) as e:
+        main(["approve"])
+    assert e.value.code == 2

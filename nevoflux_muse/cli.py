@@ -62,6 +62,63 @@ def _reply_failed(args: argparse.Namespace, reply: dict) -> int:
     return 1
 
 
+EXIT_APPROVAL = 3
+_CODED = {"approval_expired"}  # bridge errors printed code-first, like the head's tool errors
+
+
+def _coded_failure(args: argparse.Namespace, code: str, message: str, extra: dict) -> int:
+    if args.json:
+        print(json.dumps({"error": code, "message": message, **extra}))
+    else:
+        print(f"nf: {code}: {message}", file=sys.stderr)
+    return 1
+
+
+def _tool_error(result: dict) -> dict | None:
+    """The head's structured tool error (M2a spec section 5), or None for any other result."""
+    if not result.get("isError"):
+        return None
+    structured = result.get("structuredContent")
+    err = structured.get("error") if isinstance(structured, dict) else None
+    if isinstance(err, dict) and isinstance(err.get("code"), str):
+        return err
+    return None
+
+
+def _call_reply(args: argparse.Namespace, reply: dict) -> int:
+    """Print a call's outcome; `nf call`, `nf approve` and `nf deny` share it."""
+    if not reply.get("ok"):
+        err = dict(reply.get("error") or {})
+        if err.get("code") in _CODED:
+            code = err.pop("code")
+            return _coded_failure(args, code, str(err.pop("message", "")), err)
+        return _reply_failed(args, reply)
+    if "approval_required" in reply:
+        a = reply["approval_required"]
+        if args.json:
+            print(json.dumps({"approval_required": a}))
+        else:
+            print(f"NevoFlux asks for approval ({a['expires_in']}s left): {a['message']}")
+            print(f"Answer with `nf approve {a['id']}` or `nf deny {a['id']}`.")
+        return EXIT_APPROVAL
+    if "answered" in reply:
+        if reply["answered"] == "approved":
+            print(json.dumps({"approved": True}) if args.json else "Approved.")
+            return 0
+        return _coded_failure(args, "approval_denied", "you denied the request", {})
+    result = reply["result"]
+    err = _tool_error(result)
+    if err is not None:
+        extra = dict(err)
+        code = extra.pop("code")
+        return _coded_failure(args, code, str(extra.pop("message", "")), extra)
+    if args.json:
+        print(json.dumps(result))
+    else:
+        _print_content(result)
+    return 1 if result.get("isError") else 0
+
+
 def _call_args(pairs: list[str], from_stdin: bool) -> dict:
     if from_stdin:
         if pairs:
@@ -136,14 +193,37 @@ def _call(args: argparse.Namespace) -> int:
         reply = _ask(d, msg, ipc.CONNECT_WAIT + args.timeout + 5)
     except _bridge_errors() as e:
         return _failed(args, e)
+    return _call_reply(args, reply)
+
+
+def _answer(args: argparse.Namespace) -> int:
+    d = state.state_dir()
+    msg = {"op": args.command, "id": args.id, "timeout": args.timeout}
+    try:
+        reply = _ask(d, msg, args.timeout + 5)
+    except _bridge_errors() as e:
+        return _failed(args, e)
+    return _call_reply(args, reply)
+
+
+def _pending(args: argparse.Namespace) -> int:
+    d = state.state_dir()
+    try:
+        reply = _ask(d, {"op": "pending"}, 10.0)
+    except _bridge_errors() as e:
+        return _failed(args, e)
     if not reply.get("ok"):
         return _reply_failed(args, reply)
-    result = reply["result"]
+    pending = reply["pending"]
     if args.json:
-        print(json.dumps(result))
+        print(json.dumps(pending))
+    elif not pending:
+        print("No approvals are waiting.")
     else:
-        _print_content(result)
-    return 1 if result.get("isError") else 0
+        for p in pending:
+            message = " / ".join(str(p["message"]).splitlines())  # one line per approval
+            print(f"{p['id']}  {p['tool'] or '?'}  {p['expires_in']}s  {message}")
+    return 0
 
 
 def _ensure(args: argparse.Namespace) -> int:
@@ -508,6 +588,13 @@ def _parser() -> tuple[argparse.ArgumentParser, argparse.ArgumentParser]:
                       help="read the arguments as one JSON object from stdin")
     call.add_argument("--timeout", type=_positive, default=ipc.CALL_TIMEOUT,
                       help="seconds to wait for the result (default 120)")
+    for name, summary in (("approve", "approve a call NevoFlux asked about; print its result"),
+                          ("deny", "refuse a call NevoFlux asked about")):
+        answer = command(sub, name, _answer, summary)
+        answer.add_argument("id", help="the id from approval_required")
+        answer.add_argument("--timeout", type=_positive, default=ipc.CALL_TIMEOUT,
+                            help="seconds to wait for the call's result (default 120)")
+    command(sub, "pending", _pending, "list the approvals NevoFlux is waiting for")
     command(sub, "version", _version, "print client and protocol versions")
     pair_cmd = command(sub, "pair", _pair, "pair with a browser: pipe in the block from /pair-agent")
     pair_cmd.add_argument("--from-stdin", action="store_true", required=True,

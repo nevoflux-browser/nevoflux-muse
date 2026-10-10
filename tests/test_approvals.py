@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from types import SimpleNamespace
 
 from mcp import types
@@ -96,6 +97,45 @@ async def test_the_echoed_call_id_wins_otherwise_the_oldest_free_call():
     for t in (pinned, unpinned, third):
         t.cancel()
     await asyncio.gather(pinned, unpinned, third, return_exceptions=True)
+
+
+async def test_a_stamp_naming_no_running_call_is_never_given_to_another_call():
+    a = Approvals()
+    gone = a.open_call("browser_type")
+    a.close_call(gone)  # e.g. the client already gave up on it
+    running = a.open_call("browser_click")
+    asking = asyncio.create_task(a.elicit(CTX, form(meta={CALL_META: gone.id})))
+    await asyncio.sleep(0)
+    assert running.approval is None and not running.asked.is_set()
+    [listed] = a.pending()
+    assert listed["tool"] is None
+    asking.cancel()
+    await asyncio.gather(asking, return_exceptions=True)
+
+
+async def test_only_true_approves():
+    a = Approvals()
+    for answer in (1, "yes", [True]):
+        asking = asyncio.create_task(a.elicit(CTX, form()))
+        await asyncio.sleep(0)
+        assert a.answer(a.pending()[0]["id"], answer) is not None
+        assert (await asyncio.wait_for(asking, 1)).action == "decline"
+
+
+async def test_the_heads_message_is_never_logged(caplog):
+    caplog.set_level(logging.DEBUG)
+    secret = "Type 'hunter2' into #password\nTab: tab 1\nWhy: test asks"
+    a = Approvals()
+    call = a.open_call("browser_type")
+    asking = asyncio.create_task(a.elicit(CTX, form(message=secret)))
+    await asyncio.sleep(0)
+    a.answer(a.pending()[0]["id"], True)
+    await asyncio.wait_for(asking, 1)
+    a.close_call(call)
+    assert caplog.records  # the bridge does log the approval, by id
+    for record in caplog.records:
+        text = record.getMessage()
+        assert "hunter2" not in text and "Tab: tab 1" not in text
 
 
 async def test_the_real_heads_request_shape_is_accepted():

@@ -11,9 +11,10 @@ give up on its own (it cancels the request, or the session ends), then answers
 
 Which call a question belongs to: the bridge stamps every tools/call with
 _meta[CALL_META] = the call's id. A head that copies it into the elicitation's
-_meta pins the question to that call. Otherwise the question goes to the
-oldest running call without an open question: exact while one call runs at a
-time, which is how agents use `nf`. Other _meta keys (the real head adds
+_meta pins the question to that call; a stamp naming no running call leaves
+the question with no call, so approving another call can never authorise it.
+An unstamped question goes to the oldest running call without an open
+question: exact while one call runs at a time, which is how agents use `nf`. Other _meta keys (the real head adds
 progressToken, equal to the request id) are ignored.
 
 The log names approval ids, tools and outcomes, never the head's message: it
@@ -140,8 +141,10 @@ class Approvals:
 
     def _owner(self, meta: object) -> Call | None:
         wanted = meta.get(CALL_META) if isinstance(meta, dict) else None
-        if isinstance(wanted, str) and wanted in self._calls:
-            return self._calls[wanted]
+        if wanted is not None:
+            # A stamped question belongs to that call or to none: never guess another call,
+            # or approving that one would authorise this action.
+            return self._calls.get(wanted) if isinstance(wanted, str) else None
         for call in self._calls.values():
             if call.approval is None and not (call.task is not None and call.task.done()):
                 return call
@@ -189,7 +192,7 @@ class Approvals:
         if approval is None or approval.answer.done() or self._clock() >= approval.expires_at:
             return None
         approval.answer.set_result(
-            types.ElicitResult(action="accept", content={"approve": True}) if approve
+            types.ElicitResult(action="accept", content={"approve": True}) if approve is True
             else types.ElicitResult(action="decline"))
         return approval
 

@@ -26,6 +26,7 @@ import contextlib
 import logging
 import random
 from collections.abc import Awaitable, Callable
+from typing import Any
 
 import anyio
 import websockets
@@ -94,6 +95,10 @@ class HeadConnection:
         self._went_live = False
         self._incompatible: IncompatibleHead | None = None
         self._task: asyncio.Task | None = None
+        # Set before __aenter__ (the bridge does): the ClientSession elicitation
+        # callback. None keeps the 0.2.0 behavior: no elicitation capability, so a
+        # head refuses every call that needs an approval (client_cannot_approve).
+        self.elicitation_callback: Callable[[Any, Any], Awaitable[Any]] | None = None
 
     async def __aenter__(self) -> HeadConnection:  # noqa: PYI034 - Self needs 3.11
         self._task = asyncio.create_task(self._run())
@@ -248,7 +253,8 @@ class HeadConnection:
             async with anyio.create_task_group() as tg:
                 tg.start_soon(pump)
                 try:
-                    async with ClientSession(read_r, write_w, client_info=info) as s:
+                    async with ClientSession(read_r, write_w, client_info=info,
+                                             elicitation_callback=self.elicitation_callback) as s:
                         try:
                             with anyio.fail_after(self._challenge_timeout):
                                 await s.initialize()

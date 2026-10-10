@@ -2,7 +2,7 @@ import asyncio
 
 import anyio
 import pytest
-from mcp import MCPError
+from mcp import MCPError, types
 from mcp.shared.message import SessionMessage
 from mcp_types import CONNECTION_CLOSED, jsonrpc_message_adapter
 
@@ -401,3 +401,21 @@ async def test_a_challenge_from_an_earlier_connection_is_refused(relay, head, mo
         await s2.send_ping()
         assert await conn.session(timeout=1) is s2
         assert count(head, "initialize") == 2
+
+
+async def test_initialize_declares_elicitation_only_with_a_callback(relay, head):
+    async with HeadConnection(pairing(relay), fixed_token, **FAST) as conn:
+        await conn.session(timeout=5)
+    plain = next(m for m in head.requests if m.get("method") == "initialize")
+    assert "elicitation" not in plain["params"]["capabilities"]
+
+    async def approve(context, params):
+        return types.ElicitResult(action="accept", content={"approve": True})
+
+    head.requests.clear()
+    conn = HeadConnection(pairing(relay), fixed_token, **FAST)
+    conn.elicitation_callback = approve
+    async with conn:
+        await conn.session(timeout=5)
+    asking = next(m for m in head.requests if m.get("method") == "initialize")
+    assert "form" in asking["params"]["capabilities"]["elicitation"]

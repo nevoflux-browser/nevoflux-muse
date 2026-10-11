@@ -50,6 +50,19 @@ def test_cookies_are_never_sent_back(account):
     assert all("Cookie" not in r["headers"] for r in account.requests)
 
 
+def test_every_request_names_this_client(account):
+    # Cloudflare in front of nevoflux.app answers 403 to urllib's default
+    # "Python-urllib/x.y" User-Agent, so every request must carry our own.
+    client = auth.AccountClient(account.url)
+    client.device_code()
+    account.polls = ["approve"]
+    token = client.poll("dev-1").token
+    client.mint_jwt(token)
+    client.revoke(token)
+    agents = {r["headers"].get("User-Agent") for r in account.requests}
+    assert agents == {f"nevoflux-muse/{auth.__version__}"}, agents
+
+
 def test_mint_and_revoke(account):
     client = auth.AccountClient(account.url)
     account.valid.add("tok-1")

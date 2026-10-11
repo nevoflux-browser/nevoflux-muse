@@ -25,9 +25,12 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import state
+from . import __version__, state
 
 DEFAULT_ACCOUNT_URL = "https://nevoflux.app"
+# Cloudflare in front of nevoflux.app answers 403 to urllib's default
+# "Python-urllib/x.y" User-Agent, so every request names this client instead.
+USER_AGENT = f"nevoflux-muse/{__version__}"
 CLIENT_ID = "nevoflux-muse"
 GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
 TIMEOUT = 10
@@ -99,6 +102,7 @@ class AccountClient:
         data = None if body is None else json.dumps(body).encode()
         req = urllib.request.Request(self.base_url + path, data=data, method=method)
         req.add_header("Accept", "application/json")
+        req.add_header("User-Agent", USER_AGENT)
         if data is not None:
             req.add_header("Content-Type", "application/json")
         if token:

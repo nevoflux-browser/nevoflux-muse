@@ -31,7 +31,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import __version__, auth, ipc, pairing, state
+from . import __version__, aio, auth, ipc, pairing, state
 from .bridge import Bridge, serve
 
 SUPPORTED = sys.platform != "win32"
@@ -350,7 +350,7 @@ async def _main(d: Path) -> int:
         finally:
             server.close()
             with contextlib.suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(server.wait_closed(), 2)
+                await aio.wait_for(server.wait_closed(), 2)
             with contextlib.suppress(FileNotFoundError):
                 if path.stat().st_ino == inode:  # still ours: a newer bridge may own the name
                     path.unlink()

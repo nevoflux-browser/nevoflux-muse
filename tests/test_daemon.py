@@ -163,7 +163,8 @@ async def test_cli_end_to_end(world, capsys):
     code, result = await nf("call", "browser_snapshot")
     assert code == 0 and result["content"][0]["text"] == "fake browser_snapshot"
     code, err = await nf("call", "bash", "command=id")
-    assert code == 1 and err["code"] == "mcp_error"
+    # a tool outside the head's whitelist is an unknown_tool tool error (M2a), not mcp_error
+    assert code == 1 and err == {"error": "unknown_tool", "message": "bash is not offered"}
     code, out = await nf("reset")
     assert code == 0 and out["revoked"] is True
     assert not ipc.socket_path(world.d).exists() and daemon.alive(world.d) is None

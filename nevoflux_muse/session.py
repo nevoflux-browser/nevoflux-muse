@@ -35,7 +35,7 @@ from mcp.shared.message import SessionMessage
 from mcp_types import jsonrpc_message_adapter
 from pydantic import ValidationError
 
-from . import PROTOCOL_MAX, PROTOCOL_MIN, __version__
+from . import PROTOCOL_MAX, PROTOCOL_MIN, __version__, aio
 from .auth import AccountError, AuthRevoked
 from .envelope import Challenge, Envelope, Message
 from .pairing import Pairing
@@ -119,7 +119,7 @@ class HeadConnection:
                     return self._session
                 await self._changed.wait()
 
-        return await asyncio.wait_for(wait(), timeout)
+        return await aio.wait_for(wait(), timeout)
 
     @property
     def error(self) -> Exception | None:
@@ -200,7 +200,7 @@ class HeadConnection:
             while True:
                 timeout = None if deadline is None else max(0.0, deadline - loop.time())
                 try:
-                    item = await asyncio.wait_for(link.recv(), timeout)
+                    item = await aio.wait_for(link.recv(), timeout)
                 except asyncio.TimeoutError:
                     log.info("no challenge within %ss; redialing", self._challenge_timeout)
                     return

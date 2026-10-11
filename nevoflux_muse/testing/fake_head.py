@@ -42,6 +42,7 @@ import os
 
 import websockets
 
+from .. import aio
 from ..approvals import APPROVAL_SCHEMA, CALL_META
 from ..transport import Peers, RelayLink
 
@@ -242,7 +243,7 @@ class FakeHead:
                               "params": {"mode": "form", "message": ask_message(name),
                                          "requestedSchema": APPROVAL_SCHEMA, "_meta": meta}})
             try:
-                reply = await asyncio.wait_for(waiting, self.approval_timeout)
+                reply = await aio.wait_for(waiting, self.approval_timeout)
             except asyncio.TimeoutError:
                 self._waiting.pop(eid, None)
                 await self._send({"jsonrpc": "2.0", "method": "notifications/cancelled",

@@ -36,6 +36,8 @@ from dataclasses import dataclass, field
 
 from mcp import types
 
+from . import aio
+
 log = logging.getLogger(__name__)
 
 CALL_META = "io.nevoflux/call"
@@ -190,7 +192,7 @@ class Approvals:
                  f"call {call.tool!r}" if call is not None else "no running call")
         outcome = "gone"
         try:
-            result = await asyncio.wait_for(approval.answer, self.hold)
+            result = await aio.wait_for(approval.answer, self.hold)
             outcome = {"accept": "approved", "decline": "denied"}.get(result.action,
                                                                        "cancelled")
             return result

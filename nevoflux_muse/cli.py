@@ -440,8 +440,8 @@ _STATUS_TEXT = {
     "not_authorized": "Not signed in: run `nf auth begin`.",
     "ready": "Paired and signed in.",
     "connecting": "Connecting to the browser...",
-    "head_offline": "The browser is not online (NevoFlux is closed, or this agent was removed "
-                    "there).",
+    "head_offline": "The browser is not online (NevoFlux is closed, this agent was paused in "
+                    "the NevoFlux sidebar, or it was removed there).",
     "connected": "Connected to the browser.",
     "incompatible": "The browser speaks another agent protocol: upgrade nevoflux-muse.",
     "auth_revoked": "The sign-in is no longer valid: run `nf auth begin --reset`.",

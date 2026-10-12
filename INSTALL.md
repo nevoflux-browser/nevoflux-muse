@@ -189,9 +189,10 @@ Run this every 5 seconds until `state` is `connected`:
 Tell the person (when `connected`): "Connected. I can now use your NevoFlux browser."
 
 If the state stays `head_offline` or `connecting` for more than 5 minutes, stop polling and
-tell the person. Tell the person: "I cannot reach your NevoFlux browser. Is NevoFlux open, and
-is this agent still listed there? If not, please run `/pair-agent` and send me a fresh
-block." Other states follow the table.
+tell the person. Tell the person: "I cannot reach your NevoFlux browser. Is NevoFlux open,
+is this agent paused in the NevoFlux sidebar (press Resume there), and is it still listed
+there? If it is gone, please run `/pair-agent` and send me a fresh block." Other states
+follow the table.
 
 ## 7. Self-check
 
@@ -317,7 +318,7 @@ connection) have the form `{"error": "<sentence>"}` and may carry a `code`; for 
 | `not_authorized` | Paired, but not signed in (or the last sign-in expired or was denied; `last_error` shows it only in the call that found it). | Do step 5. |
 | `ready` | Paired and signed in; the bridge has not reported yet. | Poll again in a few seconds. |
 | `connecting` | The bridge is dialing the browser. | Poll again. If it lasts more than a few minutes, see `head_offline`. |
-| `head_offline` | The browser is not reachable: NevoFlux is closed, or the agent was removed there. | Tell the person: "NevoFlux does not seem to be open, or this agent was removed in it. Please open NevoFlux; if the agent is gone from its list, send me a new `/pair-agent` block." Keep polling; it reconnects by itself when the browser returns. |
+| `head_offline` | The browser is not reachable: NevoFlux is closed, the person paused this agent in the NevoFlux sidebar, or the agent was removed there. | Tell the person: "NevoFlux does not seem to be open, or this agent is paused or was removed in it. Please open NevoFlux; if the agent shows as paused in the sidebar, press Resume; if it is gone from its list, send me a new `/pair-agent` block." Keep polling: it reconnects by itself when the browser is open and the agent is not paused. |
 | `connected` | Working. | Use `nf tools` and `nf call`. |
 | `incompatible` | The browser speaks another agent protocol version. | Upgrade (see "Upgrade"). If it persists, tell the person: "NevoFlux and my connection software are on incompatible versions; I need a newer release." |
 | `auth_revoked` | The account sign-in is no longer valid. | Run `nf auth begin --reset --json` and do step 5 again. |

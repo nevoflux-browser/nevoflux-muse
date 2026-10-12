@@ -567,7 +567,25 @@ def test_status_text_for_bridge_states(home, capsys, monkeypatch):
     FakeBridge(monkeypatch, {"status": {"ok": True, "state": "head_offline", "since": "s",
                                         "pid": 1, "head": None, "last_error": None}})
     assert main(["status"]) == 0
-    assert "not online" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert ("The browser is not online (NevoFlux is closed, this agent was paused in the "
+            "NevoFlux sidebar, or it was removed there).") in out
+
+
+def test_head_offline_json_state_is_unchanged(home, capsys, monkeypatch):
+    ready_home(home)
+    FakeBridge(monkeypatch, {"status": {"ok": True, "state": "head_offline", "since": "s",
+                                        "pid": 1, "head": None, "last_error": None}})
+    code, out = run_json(capsys, "status")
+    assert code == 0 and out["state"] == "head_offline"
+
+
+def test_install_guide_names_the_sidebar_pause():
+    guide = (Path(__file__).resolve().parent.parent / "INSTALL.md").read_text(encoding="utf-8")
+    row = next(line for line in guide.splitlines() if line.startswith("| `head_offline` |"))
+    assert "paused" in row and "Resume" in row
+    assert "it reconnects by itself when the browser returns" not in row
+    assert "is this agent paused in the NevoFlux sidebar" in guide
 
 
 def test_pair_and_approval_reload_the_bridge(home, account, capsys, clock, monkeypatch):

@@ -48,6 +48,25 @@ async def test_what_cannot_be_read_is_dropped(relay):
     await b.close()
 
 
+async def test_the_link_keeps_itself_alive_with_the_relays_text_ping(relay):
+    # The relay closes a socket that sent its text ping and then went quiet,
+    # which is how a client that dropped off the network stops being counted
+    # as attached. Protocol pings leave nothing for it to watch.
+    a = await RelayLink.connect(relay.url, "c", "tok", KEY, keepalive=0.05)
+    b = await RelayLink.connect(relay.url, "c", "tok", KEY)
+    await recv(a)
+    await recv(b)
+    await recv(a)
+    raw = await asyncio.wait_for(a.ws.recv(), 2)
+    assert raw == "pong"
+    # The other end never sees it, and the answer never surfaces from recv.
+    await b.send({"after": 1})
+    assert await recv(a) == {"after": 1}
+    await a.close()
+    assert a._beat.done()
+    await b.close()
+
+
 async def test_messages_are_binary(relay):
     a = await RelayLink.connect(relay.url, "c", "tok", KEY)
     b = await RelayLink.connect(relay.url, "c", "tok", KEY)

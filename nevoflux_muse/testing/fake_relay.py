@@ -7,6 +7,7 @@ Mirrors the production relay:
   - presence counts exclude the socket being told (relayTargets)
   - a newcomer hears the count once; everyone already there hears the new
     count; on a departure the survivors hear theirs
+  - a text "ping" is answered "pong" and goes nowhere else
   - a message goes to everyone else on the channel, bytes untouched; with
     nobody else there, the sender is told {"k":"peers","n":0}
   - nothing is stored
@@ -17,9 +18,10 @@ had company. Clients built against that would misread the real relay.
 Known deviations from the production relay (do not rely on these here):
   - no per-channel capacity: production holds 4 sockets and closes the oldest
     with 1013 "channel is full" (which can be the head); this double never does
-  - a text "ping" is relayed like any message; production answers "pong"
   - no /presence HTTP probe
   - no JWT/JWKS verification: any accepted token counts as "an account"
+  - a socket that stops pinging is not closed; this double sees every
+    departure, so it has no silent sockets to find
 """
 
 from __future__ import annotations
@@ -82,6 +84,9 @@ class FakeRelay:
 
         try:
             async for msg in ws:
+                if msg == "ping":
+                    await ws.send("pong")
+                    continue
                 targets = [p for p in members if p is not ws]
                 if not targets:
                     await self._tell(ws, 0)

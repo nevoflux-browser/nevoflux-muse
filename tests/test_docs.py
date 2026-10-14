@@ -18,7 +18,7 @@ def read(name):
 
 
 def test_this_is_0_3_0():
-    assert __version__ == "0.3.0"
+    assert __version__ == "0.3.1"
 
 
 def test_pyproject_matches_the_package():

@@ -17,7 +17,7 @@ On a Linux VM, an agent installs the client by following [`INSTALL.md`](INSTALL.
 which gives every step, its expected output and what to tell the person. In short:
 
 ```sh
-git clone --depth 1 -b v0.3.0 https://github.com/nevoflux-browser/nevoflux-muse ~/.local/share/nevoflux-muse/src
+git clone --depth 1 -b v0.3.1 https://github.com/nevoflux-browser/nevoflux-muse ~/.local/share/nevoflux-muse/src
 ~/.local/share/nevoflux-muse/src/setup.sh
 ```
 
@@ -105,8 +105,8 @@ python scripts/check_fixtures.py          # fixtures match the pinned head commi
 ```
 
 Tests use `nevoflux_muse.testing.FakeRelay` as the relay test double. It differs from the
-production relay in a few documented ways (no per-channel capacity, no `ping`/`pong`, no
-`/presence` probe, no JWT verification); see its module docstring.
+production relay in a few documented ways (no per-channel capacity, no `/presence` probe,
+no JWT verification, no closing of sockets that stop pinging); see its module docstring.
 
 `fixtures/muse/` is a byte-exact copy of the head's
 `crates/daemon/tests/fixtures/muse/` at the commit in `fixtures/SOURCE.json`.

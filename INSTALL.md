@@ -45,7 +45,7 @@ It prints `setup.sh would:` and a list of actions, and exits 0.
 ## 2. Install
 
 ```sh
-git clone --depth 1 -b v0.3.0 https://github.com/nevoflux-browser/nevoflux-muse ~/.local/share/nevoflux-muse/src
+git clone --depth 1 -b v0.3.1 https://github.com/nevoflux-browser/nevoflux-muse ~/.local/share/nevoflux-muse/src
 ~/.local/share/nevoflux-muse/src/setup.sh
 ```
 
@@ -53,7 +53,7 @@ Expected: `setup.sh` ends with one JSON line from `nf setup` followed by a text 
 
 ```text
 {"supervision": "systemd-user", "started": false, "unit": "/home/<you>/.config/systemd/user/nevoflux-muse.service"}
-Installed nevoflux-muse v0.3.0 into /home/<you>/.local/share/nevoflux-muse.
+Installed nevoflux-muse v0.3.1 into /home/<you>/.local/share/nevoflux-muse.
 Next (INSTALL.md): ...
 ```
 
@@ -61,7 +61,7 @@ Next (INSTALL.md): ...
   its path) or `detached+watchdog` (no usable systemd user session; the watchdog in step 3
   keeps it running; `unit` is `null`). Either is fine. `started` is `false` until pairing
   and sign-in are done.
-- Check: `~/.local/bin/nf version --json` prints `{"client": "0.3.0", "protocol": {...}}`.
+- Check: `~/.local/bin/nf version --json` prints `{"client": "0.3.1", "protocol": {...}}`.
 
 If it fails:
 
@@ -201,7 +201,7 @@ follow the table.
 ~/.local/bin/nf tools
 ```
 
-Expected: `nevoflux-muse 0.3.0 (protocol 1-1)`, then one line per browser tool, 16 in all:
+Expected: `nevoflux-muse 0.3.1 (protocol 1-1)`, then one line per browser tool, 16 in all:
 `browser_snapshot`, `browser_get_markdown`, `browser_screenshot`, `browser_get_tabs`,
 `browser_navigate`, `browser_wait_for`, `browser_click_by_id`, `browser_fill_by_id`,
 `browser_type_by_id`, `browser_click`, `browser_fill`, `browser_type`, `browser_key_press`,

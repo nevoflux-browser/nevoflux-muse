@@ -13,6 +13,11 @@ returns approval_required at once and the call keeps waiting, with its slot,
 until `approve` or `deny` answers; the approval wait does not count toward its
 timeout. The log names the tool, the outcome and the time taken, never
 arguments, results or approval messages.
+
+A delegated task's tools (tasks.py) are ordinary calls. The bridge reads every
+nevoflux_task_wait result for the approvals it lists, so `approve`/`deny` with
+such an approval id (a UUID) can answer it with nevoflux_task_approve; an
+8-hex id is one of our own elicitation questions, as before.
 """
 
 from __future__ import annotations
@@ -29,7 +34,7 @@ from pathlib import Path
 from mcp import MCPError
 from mcp_types import CONNECTION_CLOSED
 
-from . import __version__, auth, ipc, pairing, state
+from . import __version__, auth, ipc, pairing, state, tasks
 from .approvals import APPROVAL_HOLD, APPROVAL_WINDOW, CALL_META, Approvals, Call, Deadline
 from .session import HeadConnection
 
@@ -67,6 +72,7 @@ class Bridge:
         self._call_timeout = call_timeout
         self._slots = asyncio.Semaphore(max_in_flight)
         self.approvals = Approvals(window=approval_window, hold=approval_hold)
+        self.task_approvals = tasks.ApprovalIndex()  # outlives reloads: the head keeps them
         self._running: set[asyncio.Task] = set()  # call tasks, taken down by stop and reload
         self._conn: HeadConnection | None = None
         self._load_error: str | None = None
@@ -260,6 +266,8 @@ class Bridge:
                 dumped = result.model_dump(mode="json", by_alias=True, exclude_none=True)
             except Exception as e:  # noqa: BLE001 - name the type only
                 raise _Fail("internal", f"unexpected {type(e).__name__}") from None
+            if call.tool == tasks.WAIT:
+                self.task_approvals.learn(dumped)
             return {"ok": True, "result": dumped}
         except _Fail as f:
             return f.reply
@@ -298,6 +306,10 @@ class Bridge:
         if not isinstance(approval_id, str) or not approval_id:
             raise _Fail("bad_request", "approve and deny need the approval id")
         wait = _seconds(msg, "timeout", self._call_timeout)
+        if tasks.is_task_id(approval_id):
+            return await self._answer_task(msg, approval_id, approve, wait)
+        if "task" in msg or "answer" in msg:
+            raise _Fail("bad_request", "task and answer only go with a delegated task's approval")
         approval = self.approvals.answer(approval_id, approve)
         if approval is None:
             raise _Fail("approval_expired", "that approval is no longer open: it expired, was "
@@ -306,6 +318,29 @@ class Bridge:
         if call is None or call.task is None:
             return {"ok": True, "answered": "approved" if approve else "denied"}
         return await self._follow(call, wait)
+
+    async def _answer_task(self, msg: dict, approval_id: str, approve: bool,
+                           wait: float) -> dict:
+        """Answer a delegated task's approval with nevoflux_task_approve (M3 contract §1)."""
+        task_id = msg.get("task")
+        if task_id is None:
+            task_id = self.task_approvals.task_of(approval_id)
+            if task_id is None:
+                raise _Fail("task_required",
+                            f"no task wait this bridge saw listed approval {approval_id}; "
+                            "pass the task id with --task")
+        elif not tasks.is_task_id(task_id):
+            raise _Fail("bad_request", "task must be a task id")
+        answer = msg.get("answer")
+        if answer is not None and (not approve or not isinstance(answer, str)):
+            raise _Fail("bad_request", "answer is a string and only goes with approve")
+        # The daemon matches ids case-sensitively (ruling C-F5); never allow_always (C8).
+        args = {"task_id": task_id.lower(), "approval_id": approval_id.lower(),
+                "choice": "allow" if approve else "deny"}
+        if answer is not None:
+            args["answer"] = answer
+        return await self._call({"op": "call", "tool": tasks.APPROVE, "args": args,
+                                 "timeout": wait})
 
 
 async def serve(bridge: Bridge, path: Path):

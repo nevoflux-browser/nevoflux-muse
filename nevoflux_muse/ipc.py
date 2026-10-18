@@ -5,7 +5,9 @@ the bridge answers with one JSON object and a newline and closes. Replies are
 {"ok": true, ...} or {"ok": false, "error": {"code", "message", ...}}. A call
 may also answer {"ok": true, "approval_required": {"id", "message",
 "expires_in"}}; approve/deny without a running call answer {"ok": true,
-"answered": "approved" | "denied"}. Lines may be large (screenshots travel as
+"answered": "approved" | "denied"}. approve/deny of a delegated task's approval
+(a UUID id, optional "task" and, for approve, "answer") answer like a call of
+nevoflux_task_approve. Lines may be large (screenshots travel as
 base64), up to MAX_LINE.
 """
 

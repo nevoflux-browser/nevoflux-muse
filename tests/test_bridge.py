@@ -13,7 +13,16 @@ from nevoflux_muse.bridge import Bridge, serve
 from nevoflux_muse.pairing import Pairing
 from nevoflux_muse.session import HeadConnection
 from nevoflux_muse.testing import FakeHead, FakeRelay
-from nevoflux_muse.testing.fake_head import ask_message
+from nevoflux_muse.testing.fake_head import (
+    APPROVAL_ID,
+    JPEG_B64,
+    SESSION_ID,
+    TASK_ID,
+    approval_item,
+    ask_message,
+    task_result,
+    task_state,
+)
 
 KEY = bytes(range(32))
 CHANNEL = "chan-1"
@@ -635,3 +644,103 @@ async def test_stop_cancels_open_approvals_before_it_cancels_calls(tmp_path):
     assert out["approve"]["error"]["code"] == "approval_expired"
     assert out["head_got"] == "cancel"
     assert (await asyncio.wait_for(pending, 1))["approval_required"]
+
+
+@pytest.fixture
+async def task_head(relay):
+    h = await FakeHead(relay.url, CHANNEL, KEY, scripted={
+        "nevoflux_task_start": [task_result({"task_id": TASK_ID, "session": SESSION_ID,
+                                             "state": "running"})],
+        "nevoflux_task_wait": [
+            task_result(task_state("awaiting_approval", approvals=[approval_item("question")])),
+            task_result(task_state("done", reply="Here it is."), image=JPEG_B64)],
+        "nevoflux_task_approve": [task_result({"ok": True, "state": "running"})],
+    }).start()
+    yield h
+    await h.stop()
+
+
+def wait_msg():
+    return {"op": "call", "tool": "nevoflux_task_wait",
+            "args": {"task_id": TASK_ID, "timeout_secs": 1}, "timeout": 31.0}
+
+
+def task_calls(head):
+    return [m for m in head.requests if m.get("method") == "tools/call"]
+
+
+async def test_task_tools_go_through_call_with_their_image(bridge, task_head):
+    first = await bridge.handle(wait_msg())
+    assert first["ok"] and first["result"]["structuredContent"]["state"] == "awaiting_approval"
+    second = await bridge.handle(wait_msg())
+    assert second["result"]["content"][1] == {"type": "image", "data": JPEG_B64,
+                                              "mimeType": "image/jpeg"}
+    for call in task_calls(task_head):
+        meta = call["params"]["_meta"]
+        assert len(meta["io.nevoflux/call"]) == 8
+        assert "progressToken" not in meta  # ruling P1: the bridge never asks for progress
+
+
+async def test_a_delegated_approval_goes_to_its_task(bridge, task_head):
+    assert (await bridge.handle(wait_msg()))["ok"]
+    reply = await bridge.handle({"op": "approve", "id": APPROVAL_ID, "answer": "Blue"})
+    assert reply["ok"] and reply["result"]["structuredContent"] == {"ok": True,
+                                                                    "state": "running"}
+    sent = task_calls(task_head)[-1]["params"]
+    assert sent["name"] == "nevoflux_task_approve"
+    assert sent["arguments"] == {"task_id": TASK_ID, "approval_id": APPROVAL_ID,
+                                 "choice": "allow", "answer": "Blue"}
+
+
+async def test_deny_with_an_explicit_task(bridge, task_head):
+    reply = await bridge.handle({"op": "deny", "id": APPROVAL_ID, "task": TASK_ID})
+    assert reply["ok"]
+    assert task_calls(task_head)[-1]["params"]["arguments"] == {
+        "task_id": TASK_ID, "approval_id": APPROVAL_ID, "choice": "deny"}
+
+
+async def test_uppercase_ids_are_lowercased_on_the_wire(bridge, task_head):
+    reply = await bridge.handle({"op": "deny", "id": APPROVAL_ID.upper(),
+                                 "task": TASK_ID.upper()})  # ruling C-F5
+    assert reply["ok"]
+    assert task_calls(task_head)[-1]["params"]["arguments"] == {
+        "task_id": TASK_ID, "approval_id": APPROVAL_ID, "choice": "deny"}
+
+
+async def test_an_approval_no_wait_listed_needs_the_task(bridge, task_head):
+    reply = await bridge.handle({"op": "approve", "id": APPROVAL_ID})
+    assert reply["error"]["code"] == "task_required" and "--task" in reply["error"]["message"]
+    assert task_calls(task_head) == []  # never an answer to a guessed task
+
+
+async def test_the_index_outlives_a_reload(bridge, task_head):
+    assert (await bridge.handle(wait_msg()))["ok"]
+    assert (await bridge.handle({"op": "reload"}))["ok"]
+    assert (await bridge.handle({"op": "deny", "id": APPROVAL_ID}))["ok"]
+    assert task_calls(task_head)[-1]["params"]["arguments"]["task_id"] == TASK_ID
+
+
+@pytest.mark.parametrize("msg", [
+    {"op": "approve", "id": "3f9a1c2e", "answer": "x"},
+    {"op": "deny", "id": "3f9a1c2e", "task": TASK_ID},
+    {"op": "deny", "id": APPROVAL_ID, "task": TASK_ID, "answer": "x"},
+    {"op": "approve", "id": APPROVAL_ID, "task": "not-a-task"},
+    {"op": "approve", "id": APPROVAL_ID, "task": TASK_ID, "answer": 5},
+])
+async def test_bad_task_answers(tmp_path, msg):
+    b = Bridge(tmp_path, connection_factory=lambda: None)
+    assert (await b.handle(msg))["error"]["code"] == "bad_request"
+
+
+async def test_the_log_never_holds_the_prompt_or_the_answer(bridge, task_head, caplog):
+    with caplog.at_level("INFO"):
+        start = {"op": "call", "tool": "nevoflux_task_start",
+                 "args": {"prompt": "PRIVATE-PROMPT-7731"}, "timeout": 5}
+        assert (await bridge.handle(start))["ok"]
+        assert (await bridge.handle(wait_msg()))["ok"]
+        answer = {"op": "approve", "id": APPROVAL_ID, "answer": "PRIVATE-ANSWER-9"}
+        assert (await bridge.handle(answer))["ok"]
+    assert "PRIVATE-PROMPT-7731" not in caplog.text and "PRIVATE-ANSWER-9" not in caplog.text
+    assert "Pick a colour" not in caplog.text and "Which colour?" not in caplog.text
+    assert "call 'nevoflux_task_start' -> ok" in caplog.text
+    assert "call 'nevoflux_task_approve' -> ok" in caplog.text

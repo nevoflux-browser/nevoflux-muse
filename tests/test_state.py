@@ -157,3 +157,36 @@ def test_supervision_ignores_junk(tmp_path):
 def test_write_supervision_rejects_unknown_modes(tmp_path):
     with pytest.raises(ValueError):
         state.write_supervision(tmp_path, "cron")
+
+
+TASK = "6f1c1a52-3c1e-4b8e-9a51-2d0f6c7e9b10"
+
+
+def test_reset_removes_task_screenshots(tmp_path):
+    state.write_secret(tmp_path, state.ACCOUNT_FILE, {})
+    shots = tmp_path / state.SCREENSHOTS_DIR
+    shots.mkdir()
+    (shots / f"{TASK}.jpg").write_bytes(b"x")
+    (shots / ".shot.abc123").write_bytes(b"")  # a temp file a crash left behind
+    removed, left = state.reset(tmp_path)
+    assert removed == [state.ACCOUNT_FILE, state.SCREENSHOTS_DIR]
+    assert left == [] and not tmp_path.exists()
+
+
+def test_reset_keeps_a_screenshots_folder_holding_other_files(tmp_path):
+    shots = tmp_path / state.SCREENSHOTS_DIR
+    shots.mkdir()
+    (shots / f"{TASK}.jpg").write_bytes(b"x")
+    (shots / "mine.txt").write_text("keep", encoding="utf-8")
+    removed, left = state.reset(tmp_path)
+    assert removed == [] and left == [state.SCREENSHOTS_DIR]
+    assert (shots / "mine.txt").exists() and not (shots / f"{TASK}.jpg").exists()
+
+
+def test_reset_never_deletes_a_directory_named_like_a_screenshot(tmp_path):
+    shots = tmp_path / state.SCREENSHOTS_DIR
+    (shots / f"{TASK}.jpg").mkdir(parents=True)
+    (shots / f"{TASK}.jpg" / "inner").write_text("keep", encoding="utf-8")
+    removed, left = state.reset(tmp_path)
+    assert removed == [] and left == [state.SCREENSHOTS_DIR]
+    assert (shots / f"{TASK}.jpg" / "inner").exists()

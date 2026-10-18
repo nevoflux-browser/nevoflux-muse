@@ -8,12 +8,15 @@ One agent pairs with one head. The state directory holds:
 - `auth_pending.json`: a device grant waiting for the person to approve it
 - `supervision`: how the bridge is kept running (set by `nf setup`)
 - the bridge's socket, lock, log and output (see daemon.py)
+- `screenshots/`: the result images of delegated tasks that `nf task wait`
+  saved (screenshots.py); the person's data, so private like the rest
 
-All are secrets: the directory is created 0700 and the files 0600, written
-whole or not at all. Each carries a schema version; a file this client cannot
-read is an error, never a guess. Nothing else belongs here, and `reset` only
-ever deletes these names, so pointing NF_HOME at a directory with other files
-in it is harmless.
+All are private: the directory is created 0700 and the files 0600, written
+whole or not at all. Each JSON file carries a schema version; a file this
+client cannot read is an error, never a guess. Nothing else belongs here, and
+`reset` only ever deletes these names (and, in `screenshots/`, only the files
+named like ours), so pointing NF_HOME at a directory with other files in it is
+harmless.
 """
 
 from __future__ import annotations
@@ -22,6 +25,7 @@ import contextlib
 import json
 import math
 import os
+import re
 import sys
 import tempfile
 from collections.abc import Mapping
@@ -37,6 +41,10 @@ BRIDGE_FILES = ("bridge.sock", "bridge.lock", "bridge.out", "bridge.log",
                 "bridge.log.1", "bridge.log.2", "bridge.log.3")
 KNOWN_FILES = (ACCOUNT_FILE, AUTH_PENDING_FILE, PAIRING_FILE, SUPERVISION_FILE,
                *BRIDGE_FILES)
+SCREENSHOTS_DIR = "screenshots"
+SCREENSHOT_NAME = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(?:jpg|png)")
+SCREENSHOT_TEMP = ".shot."
 SCHEMA = 1
 NUMBER = (int, float)  # a field type: JSON numbers (never bool)
 
@@ -135,6 +143,33 @@ def unpair(d: Path) -> bool:
     return True
 
 
+def _reset_screenshots(d: Path) -> bool:
+    """Delete the task screenshots we saved; True if the folder went too.
+
+    Only regular files named like ours go: a symlink is unlinked never followed,
+    and a directory is never touched. Each entry fails on its own.
+    """
+    where = d / SCREENSHOTS_DIR
+    try:
+        entries = list(where.iterdir())
+    except OSError:
+        return False
+    for entry in entries:
+        if not (SCREENSHOT_NAME.fullmatch(entry.name) or entry.name.startswith(SCREENSHOT_TEMP)):
+            continue
+        try:
+            if entry.is_symlink() or not entry.is_file():
+                continue
+            entry.unlink()
+        except OSError:
+            continue
+    try:
+        where.rmdir()
+    except OSError:
+        return False  # it holds something we did not write: leave it
+    return True
+
+
 def reset(d: Path, keep: tuple[str, ...] = ()) -> tuple[list[str], list[str]]:
     """Forget what this client wrote, except `keep`. Returns (removed, left behind)."""
     removed = []
@@ -146,6 +181,8 @@ def reset(d: Path, keep: tuple[str, ...] = ()) -> tuple[list[str], list[str]]:
         except FileNotFoundError:
             continue
         removed.append(name)
+    if SCREENSHOTS_DIR not in keep and _reset_screenshots(d):
+        removed.append(SCREENSHOTS_DIR)
     try:
         left = sorted(p.name for p in d.iterdir())
     except FileNotFoundError:

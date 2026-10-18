@@ -23,6 +23,12 @@ Mirrors the head (protocol §4-§5, and the stub head's tool table):
     the real head, every elicitation
     carries _meta.progressToken equal to its request id, and (echo_call_meta, on
     by default) copies the call's _meta["io.nevoflux/call"].
+  - M3: tools in `scripted` answer the next result of their list (the last one
+    repeats), whitelisted or not, and are listed by tools/list. When the call
+    carries _meta.progressToken, the head first sends one notifications/progress
+    per entry of `progress[tool]` ({progressToken, progress: 1, 2, ..., message},
+    no total, as M3 contract §2.2), sleeping `progress_gap` seconds before each.
+    task_result(), task_state() and approval_item() build M3 task tool results.
 
 Known deviations from the real head (do not rely on these here):
   - no bad-frame limit (the head drops the session after 8 refused frames)
@@ -67,18 +73,60 @@ def tool_error(code: str, message: str, **extra) -> dict:
             "structuredContent": structured}
 
 
+TASK_ID = "6f1c1a52-3c1e-4b8e-9a51-2d0f6c7e9b10"
+APPROVAL_ID = "0e8a7d0c-5a43-4f7e-8f55-1b2c3d4e5f60"
+SESSION_ID = "9b2d4f60-1a3c-4e5f-8a7b-6c5d4e3f2a10"
+JPEG_B64 = base64.b64encode(
+    bytes([0xFF, 0xD8, 0xFF, 0xE0]) + bytes(60) + bytes([0xFF, 0xD9])).decode()
+
+
+def task_result(structured: dict, image: str | None = None) -> dict:
+    """A task tool's success as the M3 head returns it (contract R6, R12): content[0].text is
+    structuredContent as JSON; a done wait may add one JPEG image block."""
+    content = [{"type": "text", "text": json.dumps(structured)}]
+    if image is not None:
+        content.append({"type": "image", "data": image, "mimeType": "image/jpeg"})
+    return {"content": content, "structuredContent": structured, "isError": False}
+
+
+def task_state(state: str, **extra) -> dict:
+    """A nevoflux_task_wait structuredContent (contract §2)."""
+    return {"task_id": TASK_ID, "session": SESSION_ID, "state": state, "steps": [], **extra}
+
+
+_SUMMARY = {"tool": "Submit the form on example.com", "question": "Pick a colour",
+            "plan": "Build the calculator"}
+
+
+def approval_item(kind: str = "tool", approval_id: str = APPROVAL_ID, **extra) -> dict:
+    """An approval item of a wait result (contract §2.1)."""
+    item = {"approval_id": approval_id, "kind": kind, "summary": _SUMMARY[kind],
+            "tool": "browser_click" if kind == "tool" else None, "target": None,
+            "choices": ["allow", "deny"], "at": "2026-10-16T10:00:00Z", "expires_in": 1740}
+    if kind == "question":
+        item.update(question="Which colour?", options=["Blue", "Red"])
+    if kind == "plan":
+        item.update(plan_steps=["Open the app skill", "Render the Canvas"])
+    item.update(extra)
+    return item
+
+
 class FakeHead:
     def __init__(self, relay_url: str, channel: str, key: bytes, *, token: str = "test",
                  protocol: int = 1, tools: tuple[str, ...] = ("browser_snapshot", "browser_navigate"),
                  hang: tuple[str, ...] = ("hang",), silent: bool = False,
                  ignore_initialize: int = 0, fail_initialize: int = 0,
                  ask: tuple[str, ...] = (), approval_timeout: float = 60.0,
-                 errors: dict[str, dict] | None = None, echo_call_meta: bool = True):
+                 errors: dict[str, dict] | None = None, echo_call_meta: bool = True,
+                 scripted: dict[str, list[dict]] | None = None,
+                 progress: dict[str, list[str]] | None = None, progress_gap: float = 0.0):
         self.relay_url, self.channel, self.key, self.token = relay_url, channel, key, token
         self.protocol, self.tools, self.hang, self.silent = protocol, tools, hang, silent
         self.ignore_initialize, self.fail_initialize = ignore_initialize, fail_initialize
         self.ask, self.approval_timeout = ask, approval_timeout
         self.errors, self.echo_call_meta = dict(errors or {}), echo_call_meta
+        self.scripted = {name: list(results) for name, results in (scripted or {}).items()}
+        self.progress, self.progress_gap = dict(progress or {}), progress_gap
         self.requests: list[dict] = []
         self.sent: list[dict] = []
         self.answers: list[dict] = []
@@ -197,9 +245,15 @@ class FakeHead:
         elif method == "ping":
             result = {}
         elif method == "tools/list":
-            result = {"tools": [{"name": t, "inputSchema": {"type": "object"}} for t in self.tools]}
+            names = self.tools + tuple(n for n in self.scripted if n not in self.tools)
+            result = {"tools": [{"name": t, "inputSchema": {"type": "object"}} for t in names]}
         elif method == "tools/call":
             name = params.get("name")
+            if name in self.scripted:
+                job = asyncio.create_task(self._play(mid, name, params))
+                self._jobs.add(job)
+                job.add_done_callback(self._jobs.discard)
+                return
             if name in self.hang:
                 return
             if name not in WHITELIST:
@@ -262,4 +316,16 @@ class FakeHead:
                 else:
                     result = tool_error("approval_denied", "the approval was refused",
                                         reason="declined")
+        await self._send({"jsonrpc": "2.0", "id": mid, "result": result})
+
+    async def _play(self, mid, name: str, params: dict) -> None:
+        queue = self.scripted[name]
+        result = queue.pop(0) if len(queue) > 1 else queue[0]
+        token = (params.get("_meta") or {}).get("progressToken")
+        if token is not None:
+            for n, message in enumerate(self.progress.get(name, ()), 1):
+                await asyncio.sleep(self.progress_gap)
+                await self._send({"jsonrpc": "2.0", "method": "notifications/progress",
+                                  "params": {"progressToken": token, "progress": n,
+                                             "message": message}})
         await self._send({"jsonrpc": "2.0", "id": mid, "result": result})

@@ -19,6 +19,7 @@ from nevoflux_muse.session import (
     RelayRejected,
 )
 from nevoflux_muse.testing import FakeHead, FakeRelay
+from nevoflux_muse.testing.fake_head import JPEG_B64, TASK_ID, task_result, task_state
 from nevoflux_muse.transport import RelayLink, RelayRefused
 
 KEY = bytes(range(32))
@@ -529,3 +530,61 @@ async def test_fake_head_structured_errors(relay):
         assert json.loads(r.content[0].text) == expected
     finally:
         await head.stop()
+
+
+async def test_progress_and_an_image_reach_the_caller_over_the_relay(relay):
+    # M3 rulings P1/P2: mcp 2.2.0 delivers notifications/progress to call_tool's
+    # progress_callback during a long call over our own relay transport, and an image
+    # block arrives as ImageContent. The bridge does not ask for progress (P1); this pins
+    # what a later streaming `nf task wait` could rely on.
+    done = task_result(task_state("done", reply="Here it is."), image=JPEG_B64)
+    head = await FakeHead(relay.url, CHANNEL, KEY, scripted={"nevoflux_task_wait": [done]},
+                          progress={"nevoflux_task_wait": ["Running browser_navigate",
+                                                           "browser_navigate finished"]},
+                          progress_gap=0.3).start()
+    loop = asyncio.get_running_loop()
+    got = []
+
+    async def on_progress(progress, total, message):
+        got.append((loop.time(), progress, total, message))
+
+    try:
+        async with HeadConnection(pairing(relay), fixed_token, **FAST) as conn:
+            s = await conn.session(timeout=5)
+            assert "nevoflux_task_wait" in [t.name for t in (await s.list_tools()).tools]
+            started = loop.time()
+            result = await s.call_tool("nevoflux_task_wait", {"task_id": TASK_ID},
+                                       progress_callback=on_progress,
+                                       meta={"io.nevoflux/call": "0badc0de"})
+            ended = loop.time()
+    finally:
+        await head.stop()
+    assert [(p, t, m) for _, p, t, m in got] == [
+        (1.0, None, "Running browser_navigate"), (2.0, None, "browser_navigate finished")]
+    assert got[0][0] - started >= 0.25  # arrived while the call was still running
+    assert all(at <= ended for at, *_ in got)
+    call = next(m for m in head.requests if m.get("method") == "tools/call")
+    assert call["params"]["_meta"]["io.nevoflux/call"] == "0badc0de"  # our stamp survives
+    assert call["params"]["_meta"]["progressToken"] == call["id"]
+    image = result.content[1]
+    assert isinstance(image, types.ImageContent) and image.mime_type == "image/jpeg"
+    dumped = result.model_dump(mode="json", by_alias=True, exclude_none=True)
+    assert dumped["content"][1] == {"type": "image", "data": JPEG_B64, "mimeType": "image/jpeg"}
+    assert dumped["structuredContent"]["state"] == "done"
+
+
+async def test_fake_head_scripted_results_repeat_the_last(relay):
+    first = task_result(task_state("running"))
+    last = task_result(task_state("done", reply="ok"))
+    head = await FakeHead(relay.url, CHANNEL, KEY,
+                          scripted={"nevoflux_task_wait": [first, last]}).start()
+    try:
+        async with HeadConnection(pairing(relay), fixed_token, **FAST) as conn:
+            s = await conn.session(timeout=5)
+            states = [(await s.call_tool("nevoflux_task_wait", {})).structured_content["state"]
+                      for _ in range(3)]
+    finally:
+        await head.stop()
+    assert states == ["running", "done", "done"]
+    # No progress_callback: no progressToken, so no notifications/progress were sent.
+    assert not [m for m in head.sent if m.get("method") == "notifications/progress"]

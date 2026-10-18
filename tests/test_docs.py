@@ -21,8 +21,8 @@ def read(name):
     return (ROOT / name).read_text(encoding="utf-8")
 
 
-def test_this_is_0_3_0():
-    assert __version__ == "0.3.1"
+def test_this_is_0_4_0():
+    assert __version__ == "0.4.0"
 
 
 def test_pyproject_matches_the_package():

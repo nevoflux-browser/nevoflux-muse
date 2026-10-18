@@ -17,7 +17,7 @@ On a Linux VM, an agent installs the client by following [`INSTALL.md`](INSTALL.
 which gives every step, its expected output and what to tell the person. In short:
 
 ```sh
-git clone --depth 1 -b v0.3.1 https://github.com/nevoflux-browser/nevoflux-muse ~/.local/share/nevoflux-muse/src
+git clone --depth 1 -b v0.4.0 https://github.com/nevoflux-browser/nevoflux-muse ~/.local/share/nevoflux-muse/src
 ~/.local/share/nevoflux-muse/src/setup.sh
 ```
 

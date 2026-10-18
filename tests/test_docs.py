@@ -142,8 +142,9 @@ def test_install_delegation_follows_the_shipped_wait_semantics():
 def test_install_delegation_bounds_and_codes_copy():
     flat = " ".join(read("INSTALL.md").split())
     assert "will not change its settings or tiers" not in flat
-    assert ("within this agent's tier; at `full-auto` that is full access: NevoFlux's own "
-            "file-writing tools cannot change its settings or pairings, but commands can") in flat
+    assert ("at `full-auto` that is full access, including reading and writing files on the "
+            "person's computer: NevoFlux's own file-writing tools cannot change its settings "
+            "or pairings, but commands can") in flat
     assert ("right after a cancel, wait a few seconds and start again") in flat
     assert "A NevoFlux that offers delegation lists 20 tools" in flat
     assert "16 browser tools and 4 task tools" in flat
@@ -157,3 +158,17 @@ def test_readme_names_nf_task():
     flat = " ".join(readme.split())
     assert "`pending`, `task` and `setup`" in flat
     assert "the screenshots `nf task wait` saves (`screenshots/`)" in flat
+
+
+def test_install_delegation_loop_ends_and_full_auto_is_honest():
+    flat = " ".join(read("INSTALL.md").split())
+    assert "Each wait returns after at most `--timeout-secs` with the same approval" in flat
+    assert "After 30 minutes unanswered the approval is denied" in flat
+    assert "If the person says to stop, run `nf task cancel <task_id>`" in flat
+    assert "the wait blocks until they answer" not in flat
+    assert ("these limits, including the person's yes on sensitive actions, are only as "
+            "strong as full access") in flat
+    assert "choose `full-auto` only for an agent you would trust with this computer" in flat
+    assert "| `bad_result` |" in flat
+    assert "Usage errors (exit 2)" in flat and "an `--answer` over 4000 characters" in flat
+    assert "run `nf task wait <task_id>` (`nf pending` does not list a task's approvals)" in flat

@@ -10,9 +10,14 @@ from nevoflux_muse.cli import _call_reply
 
 FIX = Path(__file__).resolve().parents[1] / "fixtures" / "muse" / "tool_errors.json"
 EXTRAS = {"tier_denied": {"tier", "required"}, "approval_denied": {"reason"},
-          "tab_closed": {"tab_id"}, "tool_failed": {"detail"}}
+          "tab_closed": {"tab_id"}, "tool_failed": {"detail"},
+          "task_busy": {"task_id"}, "rate_limited": {"retry_after"},
+          "session_not_found": {"session"}, "task_not_found": {"task_id"},
+          "approval_not_found": {"approval_id"}, "approval_desktop_only": {"approval_id"}}
 CODES = {"unknown_tool", "tier_denied", "approval_denied", "approval_timeout",
-         "browser_unavailable", "no_agent_tab", "tab_closed", "tool_failed"}
+         "browser_unavailable", "no_agent_tab", "tab_closed", "tool_failed",
+         "task_busy", "rate_limited", "session_not_found", "task_not_found",
+         "approval_not_found", "approval_desktop_only", "paused"}
 
 
 def load():
@@ -56,3 +61,13 @@ def test_our_answers_are_the_ones_the_head_expects():
     data = load()
     assert dump(types.ElicitResult(action="accept", content={"approve": True})) == data["approve"]
     assert dump(types.ElicitResult(action="decline")) == data["deny"]
+
+
+def test_the_provider_form_of_task_busy(capsys):
+    # Contract R38: busy because of the model provider, not a task: no task_id, a provider.
+    raw = load()["task_busy_provider"]
+    assert types.CallToolResult.model_validate(raw).is_error is True
+    assert _call_reply(argparse.Namespace(json=True), {"ok": True, "result": raw}) == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["error"] == "task_busy" and isinstance(out["message"], str)
+    assert isinstance(out["provider"], str) and "task_id" not in out

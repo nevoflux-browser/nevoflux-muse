@@ -7,7 +7,7 @@ been paired with. The protocol is documented in the head's repository:
 [`docs/muse-client-protocol.md`](https://github.com/nevoflux-browser/nevoflux-agent/blob/main/docs/muse-client-protocol.md).
 
 Status: protocol core, resident bridge, installer and approvals. `nf pair`,
-`nf auth begin`, `nf status`, `nf tools`, `nf call`, `nf approve`, `nf deny`, `nf pending`,
+`nf auth begin`, `nf status`, `nf tools`, `nf call`, `nf approve`, `nf deny`, `nf pending`, `nf task`,
 `nf ensure`, `nf daemon`, `nf setup`, `nf unpair`, `nf reset`, `nf uninstall` and
 `nf version` work.
 
@@ -55,6 +55,16 @@ nf deny <id>                       # refuse it (exit 1, approval_denied)
 nf pending                         # the questions still open
 ```
 
+With a NevoFlux that takes delegated tasks, hand it a whole job instead of single tools
+(see [`INSTALL.md`](INSTALL.md#delegating-a-whole-task-nf-task)):
+
+```sh
+printf '%s' 'Make a calculator Canvas' | nf task start --prompt-stdin
+nf task wait <task_id>             # steps, approvals (exit 3), then the reply and a screenshot
+nf approve <approval_id> --answer 'Blue'   # answer a task's question
+nf task cancel <task_id>
+```
+
 Refusals and browser failures exit 1 with `{"error": "<code>", "message": ...}`; the codes
 are listed in [`INSTALL.md`](INSTALL.md#when-a-call-fails).
 
@@ -62,7 +72,7 @@ are listed in [`INSTALL.md`](INSTALL.md#when-a-call-fails).
 revokes the sign-in, stops the bridge and removes the installation.
 
 The bridge needs Linux or macOS. On Windows `nf daemon`, `ensure`, `tools`, `call`,
-`approve`, `deny`, `pending` and `setup` exit 1 with "unsupported on Windows", and
+`approve`, `deny`, `pending`, `task` and `setup` exit 1 with "unsupported on Windows", and
 `nf status` stops at `ready`.
 
 The bridge logs to `bridge.log` in the state directory (tool names, outcomes and timings;
@@ -72,7 +82,7 @@ never arguments or results).
 
 The client keeps its pairing (the channel key), its account token, any sign-in
 in progress and the bridge's files (`bridge.sock`, `bridge.lock`, `bridge.log*`,
-`bridge.out`) in one directory: `$NF_HOME` if set, else `%LOCALAPPDATA%\nevoflux-muse`
+`bridge.out`) and the screenshots `nf task wait` saves (`screenshots/`) in one directory: `$NF_HOME` if set, else `%LOCALAPPDATA%\nevoflux-muse`
 on Windows, `~/Library/Application Support/nevoflux-muse` on macOS, and
 `$XDG_STATE_HOME/nevoflux-muse` (default `~/.local/state/nevoflux-muse`) elsewhere.
 

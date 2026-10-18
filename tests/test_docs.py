@@ -11,6 +11,10 @@ TOOLS = ("browser_snapshot", "browser_get_markdown", "browser_screenshot", "brow
 CODES = ("unknown_tool", "tier_denied", "approval_denied", "approval_timeout",
          "browser_unavailable", "no_agent_tab", "tab_closed", "tool_failed",
          "approval_expired")
+TASK_CODES = ("task_busy", "rate_limited", "session_not_found", "task_not_found",
+              "approval_not_found", "approval_desktop_only", "paused", "task_required")
+TASK_TOOLS = ("nevoflux_task_start", "nevoflux_task_wait", "nevoflux_task_approve",
+              "nevoflux_task_cancel")
 
 
 def read(name):
@@ -91,3 +95,65 @@ def test_install_deny_retry_and_tier_wording():
     assert "<my name in NevoFlux>" not in install
     assert "`/agent-tier <id> <required>`" in install
     assert "as `/devices` shows it (the same id `/unpair` takes)" in install
+
+
+def test_install_documents_delegation():
+    install = read("INSTALL.md")
+    flat = " ".join(install.split())
+    assert "## Delegating a whole task (`nf task`)" in install
+    for command in ("nf task start --prompt-stdin", "nf task wait <task_id> --json",
+                    "nf task cancel <task_id> --json", "--answer 'Blue'", "--task <task_id>",
+                    "--session <session>"):
+        assert command in install, command
+    for code in TASK_CODES:
+        assert f"| `{code}` |" in install, code
+    for tool in TASK_TOOLS:
+        assert f"`{tool}`" in install, tool
+    assert ("Canvas tabs (`nevoflux://` pages, which `browser_get_tabs` lists) can only be "
+            "worked on through a delegated task") in flat
+    assert "Call tools directly (`nf call`)" in flat and "Delegate (`nf task`)" in flat
+    assert '"Always allow" is not yours to give' in flat
+    assert "approval with `desktop_only: true` and cannot answer it" in flat
+    assert ('turned on "Let Muse approve sensitive actions" for this agent in NevoFlux, the same '
+            "approvals come as ordinary ones") in flat
+    assert ('ask the person to approve it at the desktop, or to turn on "Let Muse approve '
+            'sensitive actions" for this agent there') in flat
+    assert "go by the latest `nf task wait`, never an earlier one" in flat
+    assert ("always ask the person first, every time, and answer for them only after they "
+            "explicitly said yes to this exact thing") in flat
+    assert "only `nf call`, `nf approve` and `nf task wait` return it" in flat
+    assert "`nf pending` does not list a task's approvals" in flat
+    assert "except the task screenshots `nf task wait` names" in flat
+    assert "skip those by `id` and `status`" in flat
+
+
+def test_install_delegation_follows_the_shipped_wait_semantics():
+    flat = " ".join(read("INSTALL.md").split())
+    assert "Exit 3 means the task is still waiting on an approval" in flat
+    assert "The same `approval_id` is the same question: do not ask the person again" in flat
+    assert ("The same `approval_id` can come back in later waits until someone answers it"
+            ) in flat
+    assert "Tell the person once, then wait again (`--timeout-secs 60`)" in flat
+    assert "Answer every approval you can before waiting again" in flat
+    assert "Other approvals may still be open; `nf task wait` shows the next one." in flat
+    assert "sooner when an approval appears" not in flat
+
+
+def test_install_delegation_bounds_and_codes_copy():
+    flat = " ".join(read("INSTALL.md").split())
+    assert "will not change its settings or tiers" not in flat
+    assert ("within this agent's tier; at `full-auto` that is full access: NevoFlux's own "
+            "file-writing tools cannot change its settings or pairings, but commands can") in flat
+    assert ("right after a cancel, wait a few seconds and start again") in flat
+    assert "A NevoFlux that offers delegation lists 20 tools" in flat
+    assert "16 browser tools and 4 task tools" in flat
+    assert "one line per browser tool, 16 of them" in flat
+
+
+def test_readme_names_nf_task():
+    readme = read("README.md")
+    for command in ("nf task start", "nf task wait", "nf task cancel"):
+        assert command in readme, command
+    flat = " ".join(readme.split())
+    assert "`pending`, `task` and `setup`" in flat
+    assert "the screenshots `nf task wait` saves (`screenshots/`)" in flat

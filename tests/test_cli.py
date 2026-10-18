@@ -1116,8 +1116,8 @@ def test_answering_while_other_approvals_are_open(home, capsys, monkeypatch):
     FakeBridge(monkeypatch, {"approve": task_reply({"ok": True, "state": "awaiting_approval"})})
     assert main(["approve", APPROVAL_ID]) == 0
     out = capsys.readouterr().out.strip()
-    assert out.startswith("Answered: the task is awaiting_approval.")
-    assert "ther approvals may still be open" in out
+    assert out == ("Answered: the task is awaiting_approval. Follow it with `nf task wait`. "
+                   "Other approvals may still be open; `nf task wait` shows the next one.")
 
 
 def test_ids_are_lowercased_before_sending(home, capsys, monkeypatch):
@@ -1164,9 +1164,10 @@ def test_answer_length(home, capsys, monkeypatch):
     assert len(fake.sent[0]["answer"]) == 4000
 
 
-@pytest.mark.parametrize(("code", "extra"), [("approval_not_found", {"approval_id": APPROVAL_ID}),
-                                             ("approval_desktop_only", {"approval_id": APPROVAL_ID}),
-                                             ("task_not_found", {"task_id": TASK_ID})])
+@pytest.mark.parametrize(("code", "extra"), [
+    ("approval_not_found", {"approval_id": APPROVAL_ID}),
+    ("approval_desktop_only", {"approval_id": APPROVAL_ID}),
+    ("task_not_found", {"task_id": TASK_ID})])
 def test_delegated_answer_errors_print_their_code(home, capsys, monkeypatch, code, extra):
     FakeBridge(monkeypatch, {"approve": {"ok": True,
                                          "result": tool_error(code, "gone", **extra)}})
@@ -1182,3 +1183,31 @@ def test_task_required_is_printed_code_first(home, capsys, monkeypatch):
         "error": "task_required", "message": "pass the task id with --task"}
     assert main(["approve", APPROVAL_ID]) == 1
     assert "nf: task_required: pass the task id with --task" in capsys.readouterr().err
+
+
+def test_desktop_only_approval_gets_a_hint(home, capsys, monkeypatch):
+    message = f"approval {APPROVAL_ID} can only be answered by the person at the desktop"
+    FakeBridge(monkeypatch, {"approve": {"ok": True, "result": tool_error(
+        "approval_desktop_only", message, approval_id=APPROVAL_ID)}})
+    assert main(["approve", APPROVAL_ID, "--json"]) == 1
+    assert json.loads(capsys.readouterr().out) == {
+        "error": "approval_desktop_only", "message": message, "approval_id": APPROVAL_ID}
+    assert main(["approve", APPROVAL_ID]) == 1
+    err = capsys.readouterr().err
+    assert f"nf: approval_desktop_only: {message}" in err
+    assert ('Ask the person at the desktop to answer it in NevoFlux, or to turn on "Let Muse '
+            'approve sensitive actions" for this pairing there; do not retry.') in err
+
+
+def test_empty_answer_is_sent_as_is(home, capsys, monkeypatch):
+    fake = FakeBridge(monkeypatch, {"approve": task_reply(TASK_ANSWERED)})
+    assert main(["approve", APPROVAL_ID, "--answer", "", "--json"]) == 0
+    assert fake.sent[0]["answer"] == ""
+
+
+def test_answer_limit_counts_characters_not_utf16(home, capsys, monkeypatch):
+    fake = FakeBridge(monkeypatch, {"approve": task_reply(TASK_ANSWERED)})
+    assert main(["approve", APPROVAL_ID, "--answer", "😀" * 4001]) == 2
+    assert fake.sent == []
+    assert main(["approve", APPROVAL_ID, "--answer", "😀" * 4000, "--json"]) == 0
+    assert len(fake.sent[0]["answer"]) == 4000

@@ -73,7 +73,11 @@ def _reply_failed(args: argparse.Namespace, reply: dict) -> int:
 
 
 EXIT_APPROVAL = 3
-_CODED = {"approval_expired", "task_required"}  # bridge errors printed code-first, like the head's tool errors
+# bridge errors printed code-first, like the head's tool errors
+_CODED = {"approval_expired", "task_required"}
+_HINTS = {"approval_desktop_only": (
+    "Ask the person at the desktop to answer it in NevoFlux, or to turn on "
+    "\"Let Muse approve sensitive actions\" for this pairing there; do not retry.")}
 
 
 def _coded_failure(args: argparse.Namespace, code: str, message: str, extra: dict) -> int:
@@ -81,6 +85,8 @@ def _coded_failure(args: argparse.Namespace, code: str, message: str, extra: dic
         print(json.dumps({"error": code, "message": message, **extra}))
     else:
         print(f"nf: {code}: {message}", file=sys.stderr)
+        if code in _HINTS:
+            print(_HINTS[code], file=sys.stderr)
     return 1
 
 

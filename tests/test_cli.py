@@ -10,6 +10,16 @@ import nevoflux_muse.state as st
 from nevoflux_muse import PROTOCOL_MAX, PROTOCOL_MIN, __version__, auth
 from nevoflux_muse.cli import main
 from nevoflux_muse.state import ACCOUNT_FILE, PAIRING_FILE
+from nevoflux_muse.testing.fake_head import (
+    APPROVAL_ID,
+    JPEG_B64,
+    SESSION_ID,
+    TASK_ID,
+    approval_item,
+    task_result,
+    task_state,
+    tool_error,
+)
 
 
 def test_version_for_people(capsys):
@@ -813,3 +823,254 @@ def test_approve_needs_an_id(home, capsys):
     with pytest.raises(SystemExit) as e:
         main(["approve"])
     assert e.value.code == 2
+
+
+STARTED = {"task_id": TASK_ID, "session": SESSION_ID, "state": "running"}
+STEPS = [{"id": "t1", "at": "2026-10-16T10:00:01Z", "tool": "browser_navigate",
+          "status": "started"},
+         {"id": "t1", "at": "2026-10-16T10:00:03Z", "tool": "browser_navigate", "status": "ok"}]
+
+
+def task_reply(structured, image=None):
+    return {"ok": True, "result": task_result(structured, image=image)}
+
+
+def test_task_start(home, capsys, monkeypatch):
+    fake = FakeBridge(monkeypatch, {"call": task_reply(STARTED)})
+    monkeypatch.setattr("sys.stdin", io.StringIO("  Make a calculator Canvas\n"))
+    assert main(["task", "start", "--prompt-stdin", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == STARTED
+    assert fake.sent == [{"op": "call", "tool": "nevoflux_task_start",
+                          "args": {"prompt": "Make a calculator Canvas"}, "timeout": 120.0}]
+    assert main(["task", "start", "Make it blue", "--session", SESSION_ID]) == 0
+    assert fake.sent[-1]["args"] == {"prompt": "Make it blue", "session": SESSION_ID}
+    out = capsys.readouterr().out
+    assert f"Task {TASK_ID} started in session {SESSION_ID}." in out
+    assert f"nf task wait {TASK_ID}" in out
+
+
+def test_task_start_takes_8000_characters(home, capsys, monkeypatch):
+    fake = FakeBridge(monkeypatch, {"call": task_reply(STARTED)})
+    monkeypatch.setattr("sys.stdin", io.StringIO("é" * 8000))
+    assert main(["task", "start", "--prompt-stdin", "--json"]) == 0
+    assert len(fake.sent[0]["args"]["prompt"]) == 8000
+
+
+@pytest.mark.parametrize(("argv", "stdin"), [
+    (["task", "start"], ""),
+    (["task", "start", "x", "--prompt-stdin"], "y"),
+    (["task", "start", "--prompt-stdin"], "   \n"),
+    (["task", "start", "--prompt-stdin"], "a" * 8001),
+])
+def test_task_start_usage_errors(home, capsys, monkeypatch, argv, stdin):
+    fake = FakeBridge(monkeypatch)
+    monkeypatch.setattr("sys.stdin", io.StringIO(stdin))
+    assert main(argv) == 2
+    assert fake.sent == [] and "nf task start:" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(("code", "extra"), [
+    ("task_busy", {"task_id": TASK_ID}),
+    ("task_busy", {"provider": "claude-code"}),
+    ("rate_limited", {"retry_after": 120}),
+    ("session_not_found", {"session": "s-9"}),
+    ("paused", {}),
+    ("browser_unavailable", {}),
+])
+def test_task_start_errors_print_their_code(home, capsys, monkeypatch, code, extra):
+    FakeBridge(monkeypatch, {"call": {"ok": True, "result": tool_error(code, "why", **extra)}})
+    assert main(["task", "start", "x", "--json"]) == 1
+    assert json.loads(capsys.readouterr().out) == {"error": code, "message": "why", **extra}
+
+
+def test_an_old_nevoflux_without_delegation(home, capsys, monkeypatch):
+    old = tool_error("unknown_tool", "nevoflux_task_start is not available over the agent channel")
+    FakeBridge(monkeypatch, {"call": {"ok": True, "result": old}})
+    assert main(["task", "start", "x", "--json"]) == 1
+    assert json.loads(capsys.readouterr().out)["error"] == "unknown_tool"
+
+
+def test_task_wait_running(home, capsys, monkeypatch):
+    running = task_state("running", steps=STEPS)
+    fake = FakeBridge(monkeypatch, {"call": task_reply(running)})
+    assert main(["task", "wait", TASK_ID, "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == running
+    assert fake.sent == [{"op": "call", "tool": "nevoflux_task_wait",
+                          "args": {"task_id": TASK_ID, "timeout_secs": 30}, "timeout": 60.0}]
+    assert main(["task", "wait", TASK_ID, "--timeout-secs", "60"]) == 0
+    assert fake.sent[-1]["args"]["timeout_secs"] == 60 and fake.sent[-1]["timeout"] == 90.0
+    assert capsys.readouterr().out.splitlines() == [
+        f"Task {TASK_ID}: running",
+        "  2026-10-16T10:00:01Z  browser_navigate  started",
+        "  2026-10-16T10:00:03Z  browser_navigate  ok"]
+
+
+@pytest.mark.parametrize("secs", ["0", "61", "1.5", "x"])
+def test_task_wait_timeout_bounds(home, capsys, monkeypatch, secs):
+    fake = FakeBridge(monkeypatch)
+    with pytest.raises(SystemExit) as e:
+        main(["task", "wait", TASK_ID, "--timeout-secs", secs])
+    assert e.value.code == 2 and fake.sent == []
+
+
+def test_task_wait_with_approvals_exits_3(home, capsys, monkeypatch):
+    waiting = task_state("awaiting_approval", approvals=[
+        approval_item("tool"),
+        approval_item("question", approval_id="11111111-2222-4333-8444-555555555555"),
+        approval_item("plan", approval_id="66666666-7777-4888-8999-aaaaaaaaaaaa")])
+    FakeBridge(monkeypatch, {"call": task_reply(waiting)})
+    assert main(["task", "wait", TASK_ID, "--json"]) == 3
+    assert json.loads(capsys.readouterr().out) == waiting
+    assert main(["task", "wait", TASK_ID]) == 3
+    out = capsys.readouterr().out
+    assert (f"  approval {APPROVAL_ID}  tool  browser_click  1740s  "
+            "Submit the form on example.com") in out
+    assert "    question: Which colour?" in out and "    options: Blue | Red" in out
+    assert "    plan: Render the Canvas" in out
+    assert "`nf approve <approval_id>`" in out and "--answer TEXT" in out
+    assert "always" not in out.lower()  # allow_always is never offered (C8)
+
+
+def test_a_desktop_only_approval_is_not_offered(home, capsys, monkeypatch):
+    waiting = task_state("awaiting_approval", approvals=[
+        approval_item(tool=None, choices=[], desktop_only=True)])
+    FakeBridge(monkeypatch, {"call": task_reply(waiting)})
+    assert main(["task", "wait", TASK_ID]) == 3
+    out = capsys.readouterr().out
+    assert "waiting for the person at the desktop (you cannot answer this one)" in out
+    assert "`nf approve <approval_id>`" not in out
+    assert "Waiting for the person at the desktop to answer in NevoFlux" in out
+
+
+def test_task_wait_reads_desktop_only_from_each_result(home, capsys, monkeypatch):
+    # Contract v1.2 R39: the person can flip "Let Muse approve sensitive actions" while the
+    # approval waits; nothing about desktop_only is remembered from an earlier wait.
+    desk = task_state("awaiting_approval", approvals=[
+        approval_item(tool=None, choices=[], desktop_only=True)])
+    fake = FakeBridge(monkeypatch, {"call": task_reply(desk)})
+    assert main(["task", "wait", TASK_ID]) == 3
+    assert "`nf approve <approval_id>`" not in capsys.readouterr().out
+    fake.replies["call"] = task_reply(task_state("awaiting_approval", approvals=[
+        approval_item("tool")]))
+    assert main(["task", "wait", TASK_ID]) == 3
+    out = capsys.readouterr().out
+    assert "`nf approve <approval_id>`" in out
+    assert "you cannot answer this one" not in out
+    fake.replies["call"] = task_reply(desk)
+    assert main(["task", "wait", TASK_ID]) == 3
+    assert "you cannot answer this one" in capsys.readouterr().out
+
+
+def test_task_wait_done_saves_the_screenshot(home, capsys, monkeypatch):
+    done = task_state("done", reply="Here it is.")
+    FakeBridge(monkeypatch, {"call": task_reply(done, image=JPEG_B64)})
+    assert main(["task", "wait", TASK_ID, "--json"]) == 0
+    printed = capsys.readouterr().out
+    shot = home / "screenshots" / f"{TASK_ID}.jpg"
+    assert json.loads(printed) == {**done, "screenshot": str(shot)}
+    assert JPEG_B64 not in printed  # the image is a file, never base64 on stdout
+    assert shot.read_bytes() == base64.b64decode(JPEG_B64)
+    assert main(["task", "wait", TASK_ID]) == 0
+    assert capsys.readouterr().out.splitlines() == [
+        f"Task {TASK_ID}: done", "Here it is.", f"Screenshot: {shot}"]
+
+
+def test_a_later_wait_names_the_saved_screenshot(home, capsys, monkeypatch):
+    done = task_state("done", reply="Here it is.")
+    fake = FakeBridge(monkeypatch, {"call": task_reply(done, image=JPEG_B64)})
+    assert main(["task", "wait", TASK_ID, "--json"]) == 0
+    capsys.readouterr()
+    fake.replies["call"] = task_reply(done)  # R12: the image comes once per task and session
+    assert main(["task", "wait", TASK_ID, "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["screenshot"] == str(
+        home / "screenshots" / f"{TASK_ID}.jpg")
+
+
+def test_task_wait_done_without_a_screenshot(home, capsys, monkeypatch):
+    done = task_state("done", reply="Done.", screenshot_error="tab_discarded")
+    FakeBridge(monkeypatch, {"call": task_reply(done)})
+    assert main(["task", "wait", TASK_ID, "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == done
+    assert not (home / "screenshots").exists()
+    assert main(["task", "wait", TASK_ID]) == 0
+    assert "No screenshot: tab_discarded" in capsys.readouterr().out
+
+
+def test_task_wait_reports_an_unsaved_screenshot(home, capsys, monkeypatch):
+    done = task_state("done", reply="Done.")
+    FakeBridge(monkeypatch, {"call": task_reply(done, image="%%%")})
+    assert main(["task", "wait", TASK_ID, "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {**done, "screenshot_save_error": "bad_image"}
+
+
+def test_a_hostile_task_id_never_becomes_a_path(home, capsys, monkeypatch):
+    done = {**task_state("done", reply="Done."), "task_id": "../../outside"}
+    FakeBridge(monkeypatch, {"call": task_reply(done, image=JPEG_B64)})
+    assert main(["task", "wait", TASK_ID, "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["screenshot_save_error"] == "bad_task_id"
+    assert not (home / "screenshots").exists()
+    assert not list(home.parent.glob("**/outside*"))
+
+
+@pytest.mark.parametrize(("ended", "line"), [
+    (task_state("failed", error={"code": "approval_timeout",
+                                 "message": "nobody answered an approval within 30 minutes; "
+                                            "it was denied"}),
+     "approval_timeout: nobody answered an approval within 30 minutes; it was denied"),
+    (task_state("cancelled"), f"Task {TASK_ID}: cancelled"),
+])
+def test_task_wait_failed_or_cancelled_exits_1(home, capsys, monkeypatch, ended, line):
+    FakeBridge(monkeypatch, {"call": task_reply(ended)})
+    assert main(["task", "wait", TASK_ID, "--json"]) == 1
+    assert json.loads(capsys.readouterr().out) == ended
+    assert main(["task", "wait", TASK_ID]) == 1
+    assert line in capsys.readouterr().out.splitlines()
+
+
+def test_task_wait_for_an_unknown_task(home, capsys, monkeypatch):
+    gone = tool_error("task_not_found", f"no task {TASK_ID} for this agent", task_id=TASK_ID)
+    FakeBridge(monkeypatch, {"call": {"ok": True, "result": gone}})
+    assert main(["task", "wait", TASK_ID, "--json"]) == 1
+    assert json.loads(capsys.readouterr().out)["error"] == "task_not_found"
+
+
+def test_task_wait_with_an_unreadable_result(home, capsys, monkeypatch):
+    FakeBridge(monkeypatch, {"call": {"ok": True, "result": {"content": [], "isError": False}}})
+    assert main(["task", "wait", TASK_ID, "--json"]) == 1
+    assert json.loads(capsys.readouterr().out)["error"] == "bad_result"
+
+
+def test_task_cancel(home, capsys, monkeypatch):
+    fake = FakeBridge(monkeypatch, {"call": task_reply({"task_id": TASK_ID,
+                                                        "state": "cancelled"})})
+    assert main(["task", "cancel", TASK_ID, "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"task_id": TASK_ID, "state": "cancelled"}
+    assert fake.sent == [{"op": "call", "tool": "nevoflux_task_cancel",
+                          "args": {"task_id": TASK_ID}, "timeout": 120.0}]
+    assert main(["task", "cancel", TASK_ID]) == 0
+    assert capsys.readouterr().out.strip() == f"Task {TASK_ID}: cancelled."
+
+
+def test_task_alone_is_a_usage_error(home, capsys):
+    assert main(["task"]) == 2
+
+
+@pytest.mark.parametrize("argv", [["task", "start", "x"], ["task", "wait", TASK_ID],
+                                  ["task", "cancel", TASK_ID]])
+def test_task_commands_on_windows(home, capsys, argv):
+    assert main([*argv, "--json"]) == 1
+    assert "unsupported on Windows" in json.loads(capsys.readouterr().out)["error"]
+
+@pytest.mark.parametrize("session", ["", "   "])
+def test_task_start_refuses_an_empty_session(home, capsys, monkeypatch, session):
+    fake = FakeBridge(monkeypatch)
+    assert main(["task", "start", "x", "--session", session]) == 2
+    assert fake.sent == [] and "nf task start:" in capsys.readouterr().err
+
+
+def test_task_ids_are_lowercased_before_sending(home, capsys, monkeypatch):
+    fake = FakeBridge(monkeypatch, {"call": task_reply(task_state("running", steps=STEPS))})
+    assert main(["task", "wait", TASK_ID.upper(), "--json"]) == 0
+    assert main(["task", "cancel", TASK_ID.upper(), "--json"]) == 0
+    assert [m["args"]["task_id"] for m in fake.sent] == [TASK_ID, TASK_ID]
+

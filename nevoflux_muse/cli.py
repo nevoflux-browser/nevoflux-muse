@@ -14,7 +14,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from . import PROTOCOL_MAX, PROTOCOL_MIN, __version__, auth, ipc, pairing, state
+from . import PROTOCOL_MAX, PROTOCOL_MIN, __version__, auth, ipc, pairing, screenshots, state, tasks
 
 
 def _version(args: argparse.Namespace) -> int:
@@ -224,6 +224,168 @@ def _pending(args: argparse.Namespace) -> int:
             message = " / ".join(str(p["message"]).splitlines())  # one line per approval
             print(f"{p['id']}  {p['tool'] or '?'}  {p['expires_in']}s  {message}")
     return 0
+
+
+def _task_result(args: argparse.Namespace, reply: dict) -> dict | int:
+    """A task tool's result, or the exit code once the failure is printed."""
+    result = reply.get("result") if reply.get("ok") else None
+    if not isinstance(result, dict) or result.get("isError"):
+        return _call_reply(args, reply)  # bridge failures and the head's tool errors
+    if not isinstance(result.get("structuredContent"), dict):
+        return _coded_failure(args, "bad_result",
+                              "NevoFlux sent a task result this client cannot read", {})
+    return result
+
+
+def _task_call(args: argparse.Namespace, tool: str, tool_args: dict,
+               timeout: float) -> dict | int:
+    msg = {"op": "call", "tool": tool, "args": tool_args, "timeout": timeout}
+    try:
+        reply = _ask(state.state_dir(), msg, ipc.CONNECT_WAIT + timeout + 5)
+    except _bridge_errors() as e:
+        return _failed(args, e)
+    return _task_result(args, reply)
+
+
+def _task_prompt(args: argparse.Namespace) -> str:
+    if args.prompt_stdin:
+        if args.prompt is not None:
+            raise _Usage("give the prompt as an argument or with --prompt-stdin, not both")
+        prompt = sys.stdin.read()
+    elif args.prompt is None:
+        raise _Usage("the prompt is missing: pipe it in with --prompt-stdin")
+    else:
+        prompt = args.prompt
+    prompt = prompt.strip()
+    if not 1 <= len(prompt) <= tasks.PROMPT_MAX:
+        raise _Usage(f"prompt must be 1 to {tasks.PROMPT_MAX} characters")
+    return prompt
+
+
+def _task_start(args: argparse.Namespace) -> int:
+    try:
+        prompt = _task_prompt(args)
+    except _Usage as e:
+        print(f"nf task start: {e}", file=sys.stderr)
+        return 2
+    tool_args = {"prompt": prompt}
+    if args.session is not None:
+        if not args.session.strip():  # contract v1.5 R5: session must be a non-empty string
+            print("nf task start: --session must not be empty", file=sys.stderr)
+            return 2
+        tool_args["session"] = args.session
+    result = _task_call(args, tasks.START, tool_args, ipc.CALL_TIMEOUT)
+    if isinstance(result, int):
+        return result
+    started = result["structuredContent"]
+    if args.json:
+        print(json.dumps(started))
+    else:
+        print(f"Task {started.get('task_id')} started in session {started.get('session')}.")
+        print(f"Follow it with `nf task wait {started.get('task_id')}`.")
+    return 0
+
+
+_WAIT_EXIT = {"running": 0, "done": 0, "awaiting_approval": EXIT_APPROVAL,
+              "failed": 1, "cancelled": 1}
+
+
+def _one_line(text: object) -> str:
+    return " / ".join(str(text).splitlines())
+
+
+def _task_lines(t: dict) -> list[str]:
+    """`nf task wait` for people: steps, approvals, then the outcome."""
+    lines = [f"Task {t.get('task_id', '?')}: {t.get('state', '?')}"]
+    if t.get("steps_truncated"):
+        lines.append("  (older steps were dropped)")
+    for s in t.get("steps") or []:
+        lines.append(f"  {s.get('at', '?')}  {s.get('tool', '?')}  {s.get('status', '?')}")
+    approvals = t.get("approvals") or []
+    for a in approvals:
+        lines.append(f"  approval {a.get('approval_id', '?')}  {a.get('kind', '?')}  "
+                     f"{a.get('tool') or '?'}  {a.get('expires_in', '?')}s  "
+                     f"{_one_line(a.get('summary', ''))}")
+        if a.get("desktop_only") is True:  # contract v1.1 R25: not ours to answer
+            lines.append("    waiting for the person at the desktop (you cannot answer this one)")
+        if a.get("kind") == "question":
+            lines.append(f"    question: {_one_line(a.get('question', ''))}")
+            if a.get("options"):
+                lines.append(f"    options: {' | '.join(_one_line(o) for o in a['options'])}")
+        for step in a.get("plan_steps") or []:
+            lines.append(f"    plan: {_one_line(step)}")
+    if any(a.get("desktop_only") is not True for a in approvals):
+        lines.append("Answer with `nf approve <approval_id>` (add `--answer TEXT` for a "
+                     "question) or `nf deny <approval_id>`.")
+    elif approvals:
+        lines.append("Waiting for the person at the desktop to answer in NevoFlux; "
+                     "run `nf task wait` again.")
+    if t.get("state") == "done":
+        if t.get("reply"):
+            lines.append(str(t["reply"]))
+        if t.get("reply_truncated"):
+            lines.append("(the reply was cut short)")
+        if "screenshot" in t:
+            lines.append(f"Screenshot: {t['screenshot']}")
+        elif "screenshot_error" in t:
+            lines.append(f"No screenshot: {t['screenshot_error']}")
+    if "screenshot_save_error" in t:
+        lines.append(f"The screenshot could not be saved: {t['screenshot_save_error']}")
+    err = t.get("error")
+    if t.get("state") == "failed" and isinstance(err, dict):
+        lines.append(f"{err.get('code', '?')}: {err.get('message', '')}")
+    return lines
+
+
+def _task_wait_output(args: argparse.Namespace, result: dict, d: Path) -> int:
+    out = dict(result["structuredContent"])
+    task_id = out.get("task_id")
+    image = next((b for b in result.get("content") or []
+                  if isinstance(b, dict) and b.get("type") == "image"), None)
+    if image is not None:
+        try:
+            out["screenshot"] = str(screenshots.save(d, task_id, image))
+        except screenshots.Unsaved as e:
+            out["screenshot_save_error"] = e.reason
+    elif out.get("state") == "done" and "screenshot_error" not in out:
+        found = screenshots.find(d, task_id)  # the head sends the image only once
+        if found is not None:
+            out["screenshot"] = str(found)
+    if args.json:
+        print(json.dumps(out))
+    else:
+        print("\n".join(_task_lines(out)))
+    return _WAIT_EXIT.get(out.get("state"), 1)
+
+
+def _task_wait(args: argparse.Namespace) -> int:
+    tool_args = {"task_id": args.task_id.lower(), "timeout_secs": args.timeout_secs}
+    result = _task_call(args, tasks.WAIT, tool_args, args.timeout_secs + tasks.WAIT_SLACK)
+    if isinstance(result, int):
+        return result
+    return _task_wait_output(args, result, state.state_dir())
+
+
+def _task_cancel(args: argparse.Namespace) -> int:
+    result = _task_call(args, tasks.CANCEL, {"task_id": args.task_id.lower()}, ipc.CALL_TIMEOUT)
+    if isinstance(result, int):
+        return result
+    out = result["structuredContent"]
+    if args.json:
+        print(json.dumps(out))
+    else:
+        print(f"Task {out.get('task_id')}: {out.get('state')}.")
+    return 0
+
+
+def _wait_secs(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError("an integer from 1 to 60") from None
+    if not tasks.WAIT_MIN <= value <= tasks.WAIT_MAX:
+        raise argparse.ArgumentTypeError("an integer from 1 to 60")
+    return value
 
 
 def _ensure(args: argparse.Namespace) -> int:
@@ -595,6 +757,21 @@ def _parser() -> tuple[argparse.ArgumentParser, argparse.ArgumentParser]:
         answer.add_argument("--timeout", type=_positive, default=ipc.CALL_TIMEOUT,
                             help="seconds to wait for the call's result (default 120)")
     command(sub, "pending", _pending, "list the approvals NevoFlux is waiting for")
+    task_cmd = sub.add_parser("task", help="hand NevoFlux a whole task to do (delegation)")
+    task_sub = task_cmd.add_subparsers(dest="task_command")
+    start = command(task_sub, "start", _task_start, "start a delegated task; returns at once")
+    start.add_argument("prompt", nargs="?", help="what to do (prefer --prompt-stdin)")
+    start.add_argument("--prompt-stdin", action="store_true",
+                       help="read the prompt from stdin (it may hold private text)")
+    start.add_argument("--session",
+                       help="continue a session that an earlier task of yours started")
+    wait = command(task_sub, "wait", _task_wait,
+                   "wait for news of a task: steps, approvals, the result")
+    wait.add_argument("task_id")
+    wait.add_argument("--timeout-secs", type=_wait_secs, default=tasks.WAIT_DEFAULT,
+                      help="return after at most this many seconds, 1 to 60 (default 30)")
+    cancel = command(task_sub, "cancel", _task_cancel, "stop a delegated task")
+    cancel.add_argument("task_id")
     command(sub, "version", _version, "print client and protocol versions")
     pair_cmd = command(sub, "pair", _pair, "pair with a browser: pipe in the block from /pair-agent")
     pair_cmd.add_argument("--from-stdin", action="store_true", required=True,

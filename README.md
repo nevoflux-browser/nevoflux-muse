@@ -7,8 +7,8 @@ been paired with. The protocol is documented in the head's repository:
 [`docs/muse-client-protocol.md`](https://github.com/nevoflux-browser/nevoflux-agent/blob/main/docs/muse-client-protocol.md).
 
 Status: protocol core, resident bridge, installer and approvals. `nf pair`,
-`nf auth begin`, `nf status`, `nf tools`, `nf call`, `nf approve`, `nf deny`, `nf pending`, `nf task`,
-`nf ensure`, `nf daemon`, `nf setup`, `nf unpair`, `nf reset`, `nf uninstall` and
+`nf auth begin`, `nf status`, `nf tools`, `nf call`, `nf approve`, `nf deny`, `nf pending`,
+`nf task`, `nf ensure`, `nf daemon`, `nf setup`, `nf unpair`, `nf reset`, `nf uninstall` and
 `nf version` work.
 
 ## Install
@@ -82,8 +82,9 @@ never arguments or results).
 
 The client keeps its pairing (the channel key), its account token, any sign-in
 in progress and the bridge's files (`bridge.sock`, `bridge.lock`, `bridge.log*`,
-`bridge.out`) and the screenshots `nf task wait` saves (`screenshots/`) in one directory: `$NF_HOME` if set, else `%LOCALAPPDATA%\nevoflux-muse`
-on Windows, `~/Library/Application Support/nevoflux-muse` on macOS, and
+`bridge.out`) and the screenshots `nf task wait` saves (`screenshots/`) in one directory:
+`$NF_HOME` if set, else `%LOCALAPPDATA%\nevoflux-muse` on Windows,
+`~/Library/Application Support/nevoflux-muse` on macOS, and
 `$XDG_STATE_HOME/nevoflux-muse` (default `~/.local/state/nevoflux-muse`) elsewhere.
 
 - `nf unpair` forgets the paired browser and keeps the account login, ready to

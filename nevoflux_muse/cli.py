@@ -10,6 +10,7 @@ import argparse
 import base64
 import json
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -215,10 +216,23 @@ def _call(args: argparse.Namespace) -> int:
 def _answer(args: argparse.Namespace) -> int:
     delegated = tasks.is_task_id(args.id)
     answer = getattr(args, "answer", None)  # only `nf approve` has --answer
-    if not delegated and (args.task is not None or answer is not None):
+    from_stdin = getattr(args, "answer_stdin", False)
+    if answer is not None and from_stdin:
+        print(f"nf {args.command}: give the answer with --answer or --answer-stdin, not both",
+              file=sys.stderr)
+        return 2
+    if not delegated and (args.task is not None or answer is not None or from_stdin):
         print(f"nf {args.command}: --task and --answer only go with a delegated task's "
               "approval_id (from `nf task wait`)", file=sys.stderr)
         return 2
+    if args.task is not None and not tasks.is_task_id(args.task):
+        print(f"nf {args.command}: --task must be a task_id from `nf task start`",
+              file=sys.stderr)
+        return 2
+    if from_stdin:
+        answer = sys.stdin.read()
+        if answer.endswith("\n"):  # strip one trailing newline only
+            answer = answer[:-2] if answer.endswith("\r\n") else answer[:-1]
     if answer is not None and len(answer) > tasks.ANSWER_MAX:
         print(f"nf {args.command}: the answer must be at most {tasks.ANSWER_MAX} characters",
               file=sys.stderr)
@@ -250,7 +264,8 @@ def _task_answer_reply(args: argparse.Namespace, reply: dict) -> int:
         task_state = answered.get("state", "?")
         text = f"Answered: the task is {task_state}. Follow it with `nf task wait`."
         if task_state == "awaiting_approval":
-            text += " Other approvals may still be open; `nf task wait` shows the next one."
+            text += (" Other approvals from your last `nf task wait` are still open: answer "
+                     "them before waiting again.")
         print(text)
     return 0
 
@@ -343,8 +358,17 @@ _WAIT_EXIT = {"running": 0, "done": 0, "awaiting_approval": EXIT_APPROVAL,
               "failed": 1, "cancelled": 1}
 
 
+_CONTROL = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
 def _one_line(text: object) -> str:
-    return " / ".join(str(text).splitlines())
+    """One printable line: the head's text must not move the cursor or recolour the terminal."""
+    return _CONTROL.sub("", " / ".join(str(text).splitlines()))
+
+
+def _printable(text: object) -> str:
+    """Like _one_line but keeps the line breaks and tabs of a multi-line reply."""
+    return _CONTROL.sub("", str(text).replace("\r\n", "\n").replace("\r", "\n"))
 
 
 def _task_lines(t: dict) -> list[str]:
@@ -375,18 +399,20 @@ def _task_lines(t: dict) -> list[str]:
                      "run `nf task wait` again.")
     if t.get("state") == "done":
         if t.get("reply"):
-            lines.append(str(t["reply"]))
+            lines.append(_printable(t["reply"]))
         if t.get("reply_truncated"):
             lines.append("(the reply was cut short)")
         if "screenshot" in t:
             lines.append(f"Screenshot: {t['screenshot']}")
         elif "screenshot_error" in t:
-            lines.append(f"No screenshot: {t['screenshot_error']}")
+            lines.append(f"No screenshot: {_one_line(t['screenshot_error'])}")
     if "screenshot_save_error" in t:
-        lines.append(f"The screenshot could not be saved: {t['screenshot_save_error']}")
+        why = _one_line(t["screenshot_save_error"])
+        lines.append(f"The screenshot could not be saved: {why}")
     err = t.get("error")
     if t.get("state") == "failed" and isinstance(err, dict):
-        lines.append(f"{err.get('code', '?')}: {err.get('message', '')}")
+        code, message = _one_line(err.get("code", "?")), _one_line(err.get("message", ""))
+        lines.append(f"{code}: {message}")
     return lines
 
 
@@ -817,6 +843,9 @@ def _parser() -> tuple[argparse.ArgumentParser, argparse.ArgumentParser]:
                                            "when the bridge restarted since `nf task wait`")
         if name == "approve":
             answer.add_argument("--answer", help="your answer to a delegated task's question")
+            answer.add_argument("--answer-stdin", action="store_true",
+                                help="read the answer from stdin (it is the person's private "
+                                     "text; not with --answer)")
     command(sub, "pending", _pending, "list the approvals NevoFlux is waiting for")
     task_cmd = sub.add_parser("task", help="hand NevoFlux a whole task to do (delegation)")
     task_sub = task_cmd.add_subparsers(dest="task_command")

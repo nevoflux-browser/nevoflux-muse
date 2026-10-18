@@ -1117,7 +1117,8 @@ def test_answering_while_other_approvals_are_open(home, capsys, monkeypatch):
     assert main(["approve", APPROVAL_ID]) == 0
     out = capsys.readouterr().out.strip()
     assert out == ("Answered: the task is awaiting_approval. Follow it with `nf task wait`. "
-                   "Other approvals may still be open; `nf task wait` shows the next one.")
+                   "Other approvals from your last `nf task wait` are still open: answer "
+                   "them before waiting again.")
 
 
 def test_ids_are_lowercased_before_sending(home, capsys, monkeypatch):
@@ -1211,3 +1212,62 @@ def test_answer_limit_counts_characters_not_utf16(home, capsys, monkeypatch):
     assert fake.sent == []
     assert main(["approve", APPROVAL_ID, "--answer", "😀" * 4000, "--json"]) == 0
     assert len(fake.sent[0]["answer"]) == 4000
+
+
+def test_approve_answer_stdin_keeps_the_answer_off_argv(home, capsys, monkeypatch):
+    fake = FakeBridge(monkeypatch, {"approve": task_reply(TASK_ANSWERED)})
+    monkeypatch.setattr("sys.stdin", io.StringIO("my private answer\n\n"))
+    argv = ["approve", APPROVAL_ID, "--answer-stdin", "--json"]
+    assert main(argv) == 0
+    assert "private" not in " ".join(argv)
+    assert fake.sent == [{"op": "approve", "id": APPROVAL_ID, "timeout": 120.0,
+                          "answer": "my private answer\n"}]  # one trailing newline only
+    monkeypatch.setattr("sys.stdin", io.StringIO("Blue\r\n"))
+    assert main(["approve", APPROVAL_ID, "--answer-stdin", "--json"]) == 0
+    assert fake.sent[-1]["answer"] == "Blue"
+
+
+def test_answer_stdin_follows_the_answer_rules(home, capsys, monkeypatch):
+    fake = FakeBridge(monkeypatch, {"approve": task_reply(TASK_ANSWERED)})
+    monkeypatch.setattr("sys.stdin", io.StringIO("a" * 4001))
+    assert main(["approve", APPROVAL_ID, "--answer-stdin"]) == 2
+    monkeypatch.setattr("sys.stdin", io.StringIO("x"))
+    assert main(["approve", APPROVAL_ID, "--answer-stdin", "--answer", "y"]) == 2
+    assert main(["approve", "3f9a1c2e", "--answer-stdin"]) == 2
+    with pytest.raises(SystemExit) as e:
+        main(["deny", APPROVAL_ID, "--answer-stdin"])
+    assert e.value.code == 2 and fake.sent == []
+
+
+def test_approve_validates_the_task_id(home, capsys, monkeypatch):
+    fake = FakeBridge(monkeypatch, {"approve": task_reply(TASK_ANSWERED)})
+    assert main(["approve", APPROVAL_ID, "--task", "nope"]) == 2
+    assert main(["deny", APPROVAL_ID, "--task", "3f9a1c2e"]) == 2
+    assert fake.sent == []
+    assert "--task must be a task_id" in capsys.readouterr().err
+
+
+def test_text_output_strips_control_characters_from_the_head(home, capsys, monkeypatch):
+    esc = "\x1b[31m"
+    approval = {"approval_id": APPROVAL_ID, "kind": "question", "tool": None,
+                "expires_in": 60, "summary": f"{esc}sum\x07mary", "question": f"{esc}Which?\x9b",
+                "choices": ["allow", "deny"]}
+    FakeBridge(monkeypatch, {"call": task_reply(task_state("awaiting_approval",
+                                                           approvals=[approval]))})
+    assert main(["task", "wait", TASK_ID]) == 3
+    out = capsys.readouterr().out
+    assert "\x1b" not in out and "\x07" not in out and "\x9b" not in out
+    assert "[31msummary" in out and "question: [31mWhich?" in out
+    FakeBridge(monkeypatch, {"call": task_reply(task_state(
+        "done", reply=f"line one\n{esc}two\tx\x00"))})
+    assert main(["task", "wait", TASK_ID]) == 0
+    out = capsys.readouterr().out
+    assert "line one\n[31mtwo\tx" in out and "\x1b" not in out and "\x00" not in out
+    FakeBridge(monkeypatch, {"call": task_reply(task_state(
+        "failed", error={"code": "llm_error", "message": f"{esc}bad\x1b[2J"}))})
+    assert main(["task", "wait", TASK_ID]) == 1
+    assert "\x1b" not in capsys.readouterr().out
+    FakeBridge(monkeypatch, {"call": task_reply(task_state(
+        "done", reply=f"{esc}r"))})
+    assert main(["task", "wait", TASK_ID, "--json"]) == 0
+    assert esc in json.loads(capsys.readouterr().out)["reply"]  # JSON mode is unchanged

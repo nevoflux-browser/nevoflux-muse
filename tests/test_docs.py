@@ -114,10 +114,10 @@ def test_install_documents_delegation():
     assert "Call tools directly (`nf call`)" in flat and "Delegate (`nf task`)" in flat
     assert '"Always allow" is not yours to give' in flat
     assert "approval with `desktop_only: true` and cannot answer it" in flat
-    assert ('turned on "Let Muse approve sensitive actions" for this agent in NevoFlux, the same '
+    assert ('turned on "Let Muse approve sensitive actions" for this pairing in NevoFlux, the same '
             "approvals come as ordinary ones") in flat
     assert ('ask the person to approve it at the desktop, or to turn on "Let Muse approve '
-            'sensitive actions" for this agent there') in flat
+            'sensitive actions" for this pairing there') in flat
     assert "go by the latest `nf task wait`, never an earlier one" in flat
     assert ("always ask the person first, every time, and answer for them only after they "
             "explicitly said yes to this exact thing") in flat
@@ -135,7 +135,14 @@ def test_install_delegation_follows_the_shipped_wait_semantics():
             ) in flat
     assert "Tell the person once, then wait again (`--timeout-secs 60`)" in flat
     assert "Answer every approval you can before waiting again" in flat
-    assert "Other approvals may still be open; `nf task wait` shows the next one." in flat
+    assert ("Other approvals from your last `nf task wait` are still open: answer them before "
+            "waiting again.") in flat
+    assert "Other approvals may still be open" not in flat
+    assert "a wait that starts with all open approvals already returned blocks" in flat
+    assert "For anything personal use `--answer-stdin`" in flat
+    assert ("If a `done` wait shows neither `screenshot` nor `screenshot_error`, the image was "
+            "missed (the command was interrupted): it comes back after the connection "
+            "restarts") in flat
     assert "sooner when an approval appears" not in flat
 
 

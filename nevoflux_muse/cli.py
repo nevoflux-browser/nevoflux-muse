@@ -14,7 +14,17 @@ import shutil
 import sys
 from pathlib import Path
 
-from . import PROTOCOL_MAX, PROTOCOL_MIN, __version__, auth, ipc, pairing, screenshots, state, tasks
+from . import (
+    PROTOCOL_MAX,
+    PROTOCOL_MIN,
+    __version__,
+    auth,
+    ipc,
+    pairing,
+    screenshots,
+    state,
+    tasks,
+)
 
 
 def _version(args: argparse.Namespace) -> int:
@@ -229,6 +239,10 @@ def _pending(args: argparse.Namespace) -> int:
 def _task_result(args: argparse.Namespace, reply: dict) -> dict | int:
     """A task tool's result, or the exit code once the failure is printed."""
     result = reply.get("result") if reply.get("ok") else None
+    if reply.get("ok") and not isinstance(result, dict) and not (
+            "approval_required" in reply or "answered" in reply):
+        return _coded_failure(args, "bad_result",
+                              "NevoFlux sent a task result this client cannot read", {})
     if not isinstance(result, dict) or result.get("isError"):
         return _call_reply(args, reply)  # bridge failures and the head's tool errors
     if not isinstance(result.get("structuredContent"), dict):
@@ -340,8 +354,11 @@ def _task_lines(t: dict) -> list[str]:
 def _task_wait_output(args: argparse.Namespace, result: dict, d: Path) -> int:
     out = dict(result["structuredContent"])
     task_id = out.get("task_id")
-    image = next((b for b in result.get("content") or []
-                  if isinstance(b, dict) and b.get("type") == "image"), None)
+    content = result.get("content")
+    image = None  # contract R12: the image is content[1] of a done result, nowhere else
+    if (out.get("state") == "done" and isinstance(content, list) and len(content) > 1
+            and isinstance(content[1], dict) and content[1].get("type") == "image"):
+        image = content[1]
     if image is not None:
         try:
             out["screenshot"] = str(screenshots.save(d, task_id, image))

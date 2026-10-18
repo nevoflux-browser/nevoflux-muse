@@ -1051,16 +1051,6 @@ def test_task_cancel(home, capsys, monkeypatch):
     assert capsys.readouterr().out.strip() == f"Task {TASK_ID}: cancelled."
 
 
-def test_task_alone_is_a_usage_error(home, capsys):
-    assert main(["task"]) == 2
-
-
-@pytest.mark.parametrize("argv", [["task", "start", "x"], ["task", "wait", TASK_ID],
-                                  ["task", "cancel", TASK_ID]])
-def test_task_commands_on_windows(home, capsys, argv):
-    assert main([*argv, "--json"]) == 1
-    assert "unsupported on Windows" in json.loads(capsys.readouterr().out)["error"]
-
 @pytest.mark.parametrize("session", ["", "   "])
 def test_task_start_refuses_an_empty_session(home, capsys, monkeypatch, session):
     fake = FakeBridge(monkeypatch)
@@ -1074,3 +1064,34 @@ def test_task_ids_are_lowercased_before_sending(home, capsys, monkeypatch):
     assert main(["task", "cancel", TASK_ID.upper(), "--json"]) == 0
     assert [m["args"]["task_id"] for m in fake.sent] == [TASK_ID, TASK_ID]
 
+
+@pytest.mark.parametrize("state_name", ["running", "awaiting_approval"])
+def test_an_image_outside_a_done_result_is_not_saved(home, capsys, monkeypatch, state_name):
+    FakeBridge(monkeypatch, {"call": task_reply(task_state(state_name), image=JPEG_B64)})
+    assert main(["task", "wait", TASK_ID, "--json"]) == (3 if state_name != "running" else 0)
+    out = json.loads(capsys.readouterr().out)
+    assert "screenshot" not in out and "screenshot_save_error" not in out
+    assert not (home / "screenshots").exists()
+
+
+def test_a_task_command_when_the_bridge_fails(home, capsys, monkeypatch):
+    FakeBridge(monkeypatch, {"call": OSError("bridge not running")})
+    assert main(["task", "wait", TASK_ID, "--json"]) == 1
+    assert "error" in json.loads(capsys.readouterr().out)
+
+
+def test_a_task_reply_with_a_non_object_result(home, capsys, monkeypatch):
+    FakeBridge(monkeypatch, {"call": {"ok": True, "result": "oops"}})
+    assert main(["task", "cancel", TASK_ID, "--json"]) == 1
+    assert json.loads(capsys.readouterr().out)["error"] == "bad_result"
+
+
+def test_task_alone_is_a_usage_error(home, capsys):
+    assert main(["task"]) == 2
+
+
+@pytest.mark.parametrize("argv", [["task", "start", "x"], ["task", "wait", TASK_ID],
+                                  ["task", "cancel", TASK_ID]])
+def test_task_commands_on_windows(home, capsys, argv):
+    assert main([*argv, "--json"]) == 1
+    assert "unsupported on Windows" in json.loads(capsys.readouterr().out)["error"]

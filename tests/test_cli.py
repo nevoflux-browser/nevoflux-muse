@@ -1095,3 +1095,90 @@ def test_task_alone_is_a_usage_error(home, capsys):
 def test_task_commands_on_windows(home, capsys, argv):
     assert main([*argv, "--json"]) == 1
     assert "unsupported on Windows" in json.loads(capsys.readouterr().out)["error"]
+
+
+TASK_ANSWERED = {"ok": True, "state": "running"}
+
+
+def test_approve_a_delegated_question(home, capsys, monkeypatch):
+    fake = FakeBridge(monkeypatch, {"approve": task_reply(TASK_ANSWERED)})
+    assert main(["approve", APPROVAL_ID, "--answer", "Blue", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == TASK_ANSWERED
+    assert fake.sent == [{"op": "approve", "id": APPROVAL_ID, "timeout": 120.0,
+                          "answer": "Blue"}]
+    assert main(["approve", APPROVAL_ID]) == 0
+    assert capsys.readouterr().out.strip() == (
+        "Answered: the task is running. Follow it with `nf task wait`.")
+    assert fake.sent[-1] == {"op": "approve", "id": APPROVAL_ID, "timeout": 120.0}
+
+
+def test_answering_while_other_approvals_are_open(home, capsys, monkeypatch):
+    FakeBridge(monkeypatch, {"approve": task_reply({"ok": True, "state": "awaiting_approval"})})
+    assert main(["approve", APPROVAL_ID]) == 0
+    out = capsys.readouterr().out.strip()
+    assert out.startswith("Answered: the task is awaiting_approval.")
+    assert "ther approvals may still be open" in out
+
+
+def test_ids_are_lowercased_before_sending(home, capsys, monkeypatch):
+    fake = FakeBridge(monkeypatch, {"deny": task_reply(TASK_ANSWERED)})
+    assert main(["deny", APPROVAL_ID.upper(), "--task", TASK_ID.upper(), "--json"]) == 0
+    assert fake.sent[0]["id"] == APPROVAL_ID and fake.sent[0]["task"] == TASK_ID
+
+
+def test_deny_a_delegated_approval_with_its_task(home, capsys, monkeypatch):
+    fake = FakeBridge(monkeypatch, {"deny": task_reply(TASK_ANSWERED)})
+    assert main(["deny", APPROVAL_ID, "--task", TASK_ID, "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == TASK_ANSWERED
+    assert fake.sent == [{"op": "deny", "id": APPROVAL_ID, "timeout": 120.0, "task": TASK_ID}]
+
+
+@pytest.mark.parametrize("flag", ["--always", "--allow-always", "--choice=allow_always"])
+def test_allow_always_is_never_offered(home, capsys, monkeypatch, flag):
+    fake = FakeBridge(monkeypatch, {"approve": task_reply(TASK_ANSWERED)})
+    with pytest.raises(SystemExit) as e:
+        main(["approve", APPROVAL_ID, flag])
+    assert e.value.code == 2 and fake.sent == []
+
+
+def test_answer_only_goes_with_approve(home, capsys, monkeypatch):
+    fake = FakeBridge(monkeypatch)
+    with pytest.raises(SystemExit) as e:
+        main(["deny", APPROVAL_ID, "--answer", "x"])
+    assert e.value.code == 2 and fake.sent == []
+
+
+def test_direct_approvals_refuse_task_flags(home, capsys, monkeypatch):
+    fake = FakeBridge(monkeypatch)
+    assert main(["approve", "3f9a1c2e", "--answer", "x"]) == 2
+    assert main(["deny", "3f9a1c2e", "--task", TASK_ID]) == 2
+    assert fake.sent == []
+    assert "delegated task" in capsys.readouterr().err
+
+
+def test_answer_length(home, capsys, monkeypatch):
+    fake = FakeBridge(monkeypatch, {"approve": task_reply(TASK_ANSWERED)})
+    assert main(["approve", APPROVAL_ID, "--answer", "a" * 4001]) == 2
+    assert fake.sent == []
+    assert main(["approve", APPROVAL_ID, "--answer", "a" * 4000, "--json"]) == 0
+    assert len(fake.sent[0]["answer"]) == 4000
+
+
+@pytest.mark.parametrize(("code", "extra"), [("approval_not_found", {"approval_id": APPROVAL_ID}),
+                                             ("approval_desktop_only", {"approval_id": APPROVAL_ID}),
+                                             ("task_not_found", {"task_id": TASK_ID})])
+def test_delegated_answer_errors_print_their_code(home, capsys, monkeypatch, code, extra):
+    FakeBridge(monkeypatch, {"approve": {"ok": True,
+                                         "result": tool_error(code, "gone", **extra)}})
+    assert main(["approve", APPROVAL_ID, "--json"]) == 1
+    assert json.loads(capsys.readouterr().out) == {"error": code, "message": "gone", **extra}
+
+
+def test_task_required_is_printed_code_first(home, capsys, monkeypatch):
+    FakeBridge(monkeypatch, {"approve": {"ok": False, "error": {
+        "code": "task_required", "message": "pass the task id with --task"}}})
+    assert main(["approve", APPROVAL_ID, "--json"]) == 1
+    assert json.loads(capsys.readouterr().out) == {
+        "error": "task_required", "message": "pass the task id with --task"}
+    assert main(["approve", APPROVAL_ID]) == 1
+    assert "nf: task_required: pass the task id with --task" in capsys.readouterr().err

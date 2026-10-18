@@ -73,7 +73,7 @@ def _reply_failed(args: argparse.Namespace, reply: dict) -> int:
 
 
 EXIT_APPROVAL = 3
-_CODED = {"approval_expired"}  # bridge errors printed code-first, like the head's tool errors
+_CODED = {"approval_expired", "task_required"}  # bridge errors printed code-first, like the head's tool errors
 
 
 def _coded_failure(args: argparse.Namespace, code: str, message: str, extra: dict) -> int:
@@ -207,13 +207,46 @@ def _call(args: argparse.Namespace) -> int:
 
 
 def _answer(args: argparse.Namespace) -> int:
+    delegated = tasks.is_task_id(args.id)
+    answer = getattr(args, "answer", None)  # only `nf approve` has --answer
+    if not delegated and (args.task is not None or answer is not None):
+        print(f"nf {args.command}: --task and --answer only go with a delegated task's "
+              "approval_id (from `nf task wait`)", file=sys.stderr)
+        return 2
+    if answer is not None and len(answer) > tasks.ANSWER_MAX:
+        print(f"nf {args.command}: the answer must be at most {tasks.ANSWER_MAX} characters",
+              file=sys.stderr)
+        return 2
     d = state.state_dir()
-    msg = {"op": args.command, "id": args.id, "timeout": args.timeout}
+    msg = {"op": args.command, "id": args.id.lower() if delegated else args.id,
+           "timeout": args.timeout}
+    if args.task is not None:
+        msg["task"] = args.task.lower()
+    if answer is not None:
+        msg["answer"] = answer
     try:
         reply = _ask(d, msg, args.timeout + 5)
     except _bridge_errors() as e:
         return _failed(args, e)
+    if delegated:
+        return _task_answer_reply(args, reply)
     return _call_reply(args, reply)
+
+
+def _task_answer_reply(args: argparse.Namespace, reply: dict) -> int:
+    result = _task_result(args, reply)
+    if isinstance(result, int):
+        return result
+    answered = result["structuredContent"]
+    if args.json:
+        print(json.dumps(answered))
+    else:
+        task_state = answered.get("state", "?")
+        text = f"Answered: the task is {task_state}. Follow it with `nf task wait`."
+        if task_state == "awaiting_approval":
+            text += " Other approvals may still be open; `nf task wait` shows the next one."
+        print(text)
+    return 0
 
 
 def _pending(args: argparse.Namespace) -> int:
@@ -767,12 +800,17 @@ def _parser() -> tuple[argparse.ArgumentParser, argparse.ArgumentParser]:
                       help="read the arguments as one JSON object from stdin")
     call.add_argument("--timeout", type=_positive, default=ipc.CALL_TIMEOUT,
                       help="seconds to wait for the result (default 120)")
-    for name, summary in (("approve", "approve a call NevoFlux asked about; print its result"),
-                          ("deny", "refuse a call NevoFlux asked about")):
+    for name, summary in (("approve", "approve what NevoFlux asked about; print the outcome"),
+                          ("deny", "refuse what NevoFlux asked about")):
         answer = command(sub, name, _answer, summary)
-        answer.add_argument("id", help="the id from approval_required")
+        answer.add_argument("id", help="the id from approval_required, or an approval_id "
+                                       "from `nf task wait`")
         answer.add_argument("--timeout", type=_positive, default=ipc.CALL_TIMEOUT,
-                            help="seconds to wait for the call's result (default 120)")
+                            help="seconds to wait for the outcome (default 120)")
+        answer.add_argument("--task", help="the task_id an approval_id belongs to; needed only "
+                                           "when the bridge restarted since `nf task wait`")
+        if name == "approve":
+            answer.add_argument("--answer", help="your answer to a delegated task's question")
     command(sub, "pending", _pending, "list the approvals NevoFlux is waiting for")
     task_cmd = sub.add_parser("task", help="hand NevoFlux a whole task to do (delegation)")
     task_sub = task_cmd.add_subparsers(dest="task_command")

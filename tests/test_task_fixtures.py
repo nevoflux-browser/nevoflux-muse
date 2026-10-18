@@ -119,3 +119,36 @@ def test_the_progress_shapes_are_pinned():
     note = types.ProgressNotification.model_validate(f["progress_notification"])
     assert note.params.message == f["progress_notification"]["params"]["message"]
     assert isinstance(note.params.progress, (int, float))
+
+
+def wait_json(entry, d, capsys):
+    code = cli._task_wait_output(argparse.Namespace(json=True), as_result(entry), d)
+    return code, json.loads(capsys.readouterr().out)
+
+
+def test_done_cases_carry_their_reply_and_screenshot_fields(tmp_path, capsys):
+    f = fixture("task_results.json")
+    code, saved = wait_json(f["wait_done_with_image"], tmp_path, capsys)
+    assert code == 0 and saved["reply"] == "Here is your calculator."
+    assert Path(saved["screenshot"]).is_file() and "screenshot_error" not in saved
+    # the head sends the image once: a later wait (no image) names the file saved above
+    code, again = wait_json(f["wait_done_again"], tmp_path, capsys)
+    assert code == 0 and again["reply"] == "Here is your calculator."
+    assert again["screenshot"] == saved["screenshot"]
+    code, err = wait_json(f["wait_done_screenshot_error"], tmp_path, capsys)
+    assert code == 0 and err["reply"] == "Done." and err["screenshot_error"] == "no_tab"
+    assert "screenshot" not in err
+    code, failed = wait_json(f["wait_failed"], tmp_path, capsys)
+    assert code == 1 and failed["error"]["code"] == "llm_error"
+    assert "screenshot" not in failed
+
+
+def test_text_mode_shows_the_reply_and_the_error_code(tmp_path, capsys):
+    f = fixture("task_results.json")
+    args = argparse.Namespace(json=False)
+    cli._task_wait_output(args, as_result(f["wait_done_with_image"]), tmp_path)
+    assert "Here is your calculator." in capsys.readouterr().out
+    cli._task_wait_output(args, as_result(f["wait_done_screenshot_error"]), tmp_path)
+    assert "No screenshot: no_tab" in capsys.readouterr().out
+    cli._task_wait_output(args, as_result(f["wait_failed"]), tmp_path)
+    assert "llm_error: the model call failed" in capsys.readouterr().out

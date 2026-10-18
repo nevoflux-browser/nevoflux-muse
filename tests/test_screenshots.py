@@ -27,8 +27,10 @@ def test_an_uppercase_id_is_saved_lowercase(tmp_path):
     assert screenshots.find(tmp_path, TASK_ID.upper()) == path
 
 
-def test_png_keeps_its_suffix(tmp_path):
-    assert screenshots.save(tmp_path, TASK_ID, block(mime="image/png")).suffix == ".png"
+def test_png_is_refused(tmp_path):
+    with pytest.raises(screenshots.Unsaved) as e:
+        screenshots.save(tmp_path, TASK_ID, block(mime="image/png"))
+    assert e.value.reason == "unsupported_image"
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX modes")
@@ -44,6 +46,11 @@ def test_save_is_private(tmp_path):
     (TASK_ID, block(mime="image/gif"), "unsupported_image"),
     (TASK_ID, block(data="not base64!"), "bad_image"),
     (TASK_ID, block(data=""), "bad_image"),
+    (TASK_ID, block(data=base64.b64encode(b"garbage, not a jpeg").decode()), "bad_image"),
+    (TASK_ID, block(data=base64.b64encode(b"\xff\xd8\xff" + bytes(2 * 1024 * 1024)).decode()),
+     "bad_image"),
+    (TASK_ID, "not a dict", "bad_image"),
+    (TASK_ID, block(mime=["image/jpeg"]), "unsupported_image"),
     (TASK_ID, {"type": "image", "mimeType": "image/jpeg"}, "bad_image"),
 ])
 def test_save_refuses(tmp_path, task_id, image, reason):
@@ -85,3 +92,16 @@ def test_a_prune_failure_after_the_write_is_not_a_save_failure(tmp_path, monkeyp
     monkeypatch.setattr(screenshots, "_prune", boom)
     path = screenshots.save(tmp_path, TASK_ID, block())
     assert path.is_file()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks")
+def test_save_refuses_a_symlinked_folder(tmp_path):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    d = tmp_path / "nf"
+    d.mkdir()
+    (d / "screenshots").symlink_to(elsewhere)
+    with pytest.raises(screenshots.Unsaved) as e:
+        screenshots.save(d, TASK_ID, block())
+    assert e.value.reason == "save_failed"
+    assert list(elsewhere.iterdir()) == []

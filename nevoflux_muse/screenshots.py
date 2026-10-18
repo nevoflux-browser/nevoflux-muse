@@ -24,7 +24,9 @@ from . import state, tasks
 log = logging.getLogger(__name__)
 
 KEEP = 50
-SUFFIX = {"image/jpeg": ".jpg", "image/png": ".png"}
+SUFFIX = {"image/jpeg": ".jpg"}  # contract R12: one JPEG
+MAX_BYTES = 2 * 1024 * 1024
+JPEG_MAGIC = b"\xff\xd8\xff"
 
 
 class Unsaved(Exception):
@@ -54,7 +56,10 @@ def save(d: Path, task_id: object, block: dict) -> Path:
     """Write an MCP image block for this task; the path, or Unsaved with the reason."""
     if not tasks.is_task_id(task_id):
         raise Unsaved("bad_task_id")
-    suffix = SUFFIX.get(block.get("mimeType"))
+    if not isinstance(block, dict):
+        raise Unsaved("bad_image")
+    mime = block.get("mimeType")
+    suffix = SUFFIX.get(mime) if isinstance(mime, str) else None
     if suffix is None:
         raise Unsaved("unsupported_image")
     data = block.get("data")
@@ -62,16 +67,22 @@ def save(d: Path, task_id: object, block: dict) -> Path:
         raw = base64.b64decode(data, validate=True) if isinstance(data, str) else b""
     except (binascii.Error, ValueError):
         raw = b""
-    if not raw:
+    if not raw.startswith(JPEG_MAGIC) or len(raw) > MAX_BYTES:
         raise Unsaved("bad_image")
     where = _folder(d)
     target = where / f"{task_id.lower()}{suffix}"
     try:
         state.ensure_dir(d)
+        if where.is_symlink():
+            raise OSError("screenshots folder is a symlink")
         state.ensure_dir(where)
         fd, tmp = tempfile.mkstemp(dir=where, prefix=state.SCREENSHOT_TEMP)
         try:
-            os.chmod(tmp, 0o600)
+            try:
+                os.chmod(tmp, 0o600)
+            except BaseException:
+                os.close(fd)
+                raise
             with os.fdopen(fd, "wb") as f:
                 f.write(raw)
             os.replace(tmp, target)
@@ -90,7 +101,8 @@ def save(d: Path, task_id: object, block: dict) -> Path:
 
 
 def _prune(where: Path) -> None:
-    ours = [p for p in where.iterdir() if state.SCREENSHOT_NAME.fullmatch(p.name)]
+    ours = [p for p in where.iterdir() if state.SCREENSHOT_NAME.fullmatch(p.name) and p.is_file()
+            and not p.is_symlink()]
     ours.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     for old in ours[KEEP:]:
         old.unlink(missing_ok=True)

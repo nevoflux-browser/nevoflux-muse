@@ -190,3 +190,16 @@ def test_reset_never_deletes_a_directory_named_like_a_screenshot(tmp_path):
     removed, left = state.reset(tmp_path)
     assert removed == [] and left == [state.SCREENSHOTS_DIR]
     assert (shots / f"{TASK}.jpg" / "inner").exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks")
+def test_reset_skips_a_symlinked_screenshots_folder(tmp_path):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / f"{TASK}.jpg").write_bytes(b"x")
+    d = tmp_path / "nf"
+    d.mkdir()
+    (d / state.SCREENSHOTS_DIR).symlink_to(elsewhere)
+    removed, left = state.reset(d)
+    assert removed == [] and left == [state.SCREENSHOTS_DIR]
+    assert (elsewhere / f"{TASK}.jpg").exists()

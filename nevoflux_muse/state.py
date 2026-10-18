@@ -146,10 +146,12 @@ def unpair(d: Path) -> bool:
 def _reset_screenshots(d: Path) -> bool:
     """Delete the task screenshots we saved; True if the folder went too.
 
-    Only regular files named like ours go: a symlink is unlinked never followed,
-    and a directory is never touched. Each entry fails on its own.
+    Only regular files named like ours go: a symlink is skipped (never followed),
+    a directory is never touched, and a symlinked folder is left alone. Each entry fails on its own.
     """
     where = d / SCREENSHOTS_DIR
+    if where.is_symlink():
+        return False
     try:
         entries = list(where.iterdir())
     except OSError:

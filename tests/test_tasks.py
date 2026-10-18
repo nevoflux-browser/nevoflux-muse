@@ -54,3 +54,10 @@ def test_the_index_forgets_the_oldest_beyond_its_limit():
                                            approvals=[approval_item(approval_id=approval_id)])))
     assert len(index) == 2
     assert index.task_of(ids[0]) is None and index.task_of(ids[2]) == TASK_ID
+
+
+def test_a_desktop_only_approval_is_still_indexed():  # contract R39: the daemon decides
+    index = tasks.ApprovalIndex()
+    index.learn(task_result(task_state("awaiting_approval", approvals=[
+        approval_item(tool=None, choices=[], desktop_only=True)])))
+    assert index.task_of(APPROVAL_ID) == TASK_ID

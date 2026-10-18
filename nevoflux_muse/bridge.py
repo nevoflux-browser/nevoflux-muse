@@ -332,8 +332,14 @@ class Bridge:
         elif not tasks.is_task_id(task_id):
             raise _Fail("bad_request", "task must be a task id")
         answer = msg.get("answer")
-        if answer is not None and (not approve or not isinstance(answer, str)):
-            raise _Fail("bad_request", "answer is a string and only goes with approve")
+        if answer is not None:  # the daemon's checks and wording, in its order
+            if not isinstance(answer, str):
+                raise _Fail("bad_request", "answer must be a string")
+            if len(answer) > tasks.ANSWER_MAX:  # characters, as the daemon counts
+                raise _Fail("bad_request",
+                            f"answer must be at most {tasks.ANSWER_MAX} characters")
+            if not approve:
+                raise _Fail("bad_request", "answer is only allowed with allow")
         # The daemon matches ids case-sensitively (ruling C-F5); never allow_always (C8).
         args = {"task_id": task_id.lower(), "approval_id": approval_id.lower(),
                 "choice": "allow" if approve else "deny"}

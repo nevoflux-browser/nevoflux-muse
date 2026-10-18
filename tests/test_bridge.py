@@ -744,3 +744,44 @@ async def test_the_log_never_holds_the_prompt_or_the_answer(bridge, task_head, c
     assert "Pick a colour" not in caplog.text and "Which colour?" not in caplog.text
     assert "call 'nevoflux_task_start' -> ok" in caplog.text
     assert "call 'nevoflux_task_approve' -> ok" in caplog.text
+
+
+@pytest.mark.parametrize("answer,approve,message", [
+    (5, True, "answer must be a string"),
+    ("x", False, "answer is only allowed with allow"),
+    ("x" * 4001, True, "answer must be at most 4000 characters"),
+    ("😀" * 4001, True, "answer must be at most 4000 characters"),
+], ids=["not-a-string", "with-deny", "4001", "4001-astral"])
+async def test_answers_the_daemon_would_refuse(tmp_path, answer, approve, message):
+    b = Bridge(tmp_path, connection_factory=lambda: None)
+    reply = await b.handle({"op": "approve" if approve else "deny", "id": APPROVAL_ID,
+                            "task": TASK_ID, "answer": answer})
+    assert reply["error"]["code"] == "bad_request" and reply["error"]["message"] == message
+
+
+@pytest.mark.parametrize("answer", ["x" * 4000, "😀" * 4000], ids=["4000", "4000-astral"])
+async def test_an_answer_of_exactly_the_limit_is_sent(bridge, task_head, answer):
+    reply = await bridge.handle({"op": "approve", "id": APPROVAL_ID, "task": TASK_ID,
+                                 "answer": answer})
+    assert reply["ok"]
+    assert task_calls(task_head)[-1]["params"]["arguments"]["answer"] == answer
+
+
+@pytest.mark.parametrize("ask_id", [APPROVAL_ID, APPROVAL_ID.upper()])
+async def test_a_desktop_only_approval_goes_to_its_task(relay, tmp_path, ask_id):
+    wait = task_result(task_state("awaiting_approval", approvals=[
+        approval_item(tool=None, choices=[], desktop_only=True,
+                      approval_id=APPROVAL_ID.upper())]))
+    h = await FakeHead(relay.url, CHANNEL, KEY, scripted={
+        "nevoflux_task_wait": [wait],
+        "nevoflux_task_approve": [task_result({"ok": True})]}).start()
+    b = Bridge(tmp_path, connection_factory=factory_for(relay), connect_wait=5)
+    await b.start()
+    try:
+        assert (await b.handle(wait_msg()))["ok"]
+        assert (await b.handle({"op": "approve", "id": ask_id}))["ok"]
+        args = task_calls(h)[-1]["params"]["arguments"]
+        assert args["task_id"] == TASK_ID and args["approval_id"] == APPROVAL_ID
+    finally:
+        await b.stop()
+        await h.stop()
